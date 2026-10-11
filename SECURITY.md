@@ -38,7 +38,7 @@
 
 GitHub Security 탭의 **Report a vulnerability**(Private vulnerability reporting)로 알린다.
 
-<https://github.com/foxion37/vibecoder-docent/security/advisories/new>
+<https://github.com/singandmong/vibecoder-docent/security/advisories/new>
 
 공개 이슈에는 쓰지 않는다. 함께 적으면 좋은 것:
 

@@ -18,7 +18,8 @@ import { extractTerms, filterTerms, glossary } from "./review.mjs";
 import { KEYWORD_PROMPT, extractInput, parseExtract, wiki } from "./wiki.mjs";
 import { parseAnswer } from "./slots.mjs";
 import { parsePeers, peerProvider } from "./peers.mjs";
-import { repoNameOf } from "./repo.mjs";
+import { gitLocationOf, headOf } from "./repo.mjs";
+import { recentLine } from "./session-recent.mjs";
 import { config, favorites, history, saveConfig, saveKeywords, setFavorite } from "./store.mjs";
 import { extractCitations, prepareEvidence, resolveEvidence } from "./evidence.mjs";
 import { modelCatalog, selectedModel } from "./models.mjs";
@@ -50,7 +51,8 @@ const PROMPT = resolve(ROOT, "../prompt/docent.md");
 const CONFIG = await config();
 const PORT = Number(process.env.DOCENT_PORT ?? CONFIG.port ?? 4747);
 const HOST_INPUT = process.env.DOCENT_HOST ?? CONFIG.host ?? "127.0.0.1";
-const HOST = await resolveHost(HOST_INPUT);
+// host=tailscale 은 loopback 에 더해 테일스케일 주소에도 여는 뜻이다. 테일스케일 주소는 늦게 생길 수 있어 아래에서 따로 연다.
+const HOST = HOST_INPUT === "tailscale" ? "127.0.0.1" : HOST_INPUT;
 const PEERS = parsePeers(process.env.DOCENT_PEERS, CONFIG.peers);
 const OMP_BIN = process.env.OMP_BIN ?? "omp";
 const OMP_TIMEOUT_MS = 180_000;
@@ -70,23 +72,36 @@ async function tailscaleIp() {
 	return null;
 }
 
-/** "tailscale" 이면 이 컴퓨터의 테일스케일 IPv4 로. 그 외는 그대로. */
-async function resolveHost(host) {
-	if (host !== "tailscale") return host;
-	const ip = await tailscaleIp();
-	if (!ip) throw new Error("tailscale ip 를 알 수 없어요. tailscale 이 켜져 있는지 확인하세요.");
-	return ip;
-}
+const TAILSCALE_RETRY_MS = [5_000, 10_000, 30_000, 60_000];
 
-/** 작업 폴더가 속한 git 저장소 이름. 결과는 폴더별로 기억한다. */
-const repoOf = (() => {
+/** 작업 폴더의 git 위치(저장소, 워크트리, gitdir). 폴더 구조는 잘 바뀌지 않아 폴더별로 기억한다. */
+const gitPlaceOf = (() => {
 	const cache = new Map();
 	return async (cwd) => {
 		if (!cwd) return null;
-		if (!cache.has(cwd)) cache.set(cwd, await repoNameOf(cwd));
+		if (!cache.has(cwd)) cache.set(cwd, await gitLocationOf(cwd));
 		return cache.get(cwd);
 	};
 })();
+
+// 최근 작업 한 줄은 꼬리부터 읽는다. 끝부분이 도구 결과뿐이면 한 번 더 넓게 읽는다.
+const RECENT_TAIL_BYTES = [256 * 1024, 2 * 1024 * 1024];
+
+/**
+ * 목록에 보일 세션에만 브랜치, 워크트리, 최근 작업 한 줄을 붙인다. 브랜치는 바뀌므로 매번 HEAD 를 읽는다.
+ * 다른 컴퓨터(peer) 세션은 그쪽 서버가 붙여 보낸 값을 그대로 쓴다.
+ */
+async function describeSessions(sessions) {
+	const heads = new Map();
+	return Promise.all(sessions.map(async (session) => {
+		if (session.host) return session;
+		const place = await gitPlaceOf(session.cwd);
+		if (place?.gitdir && !heads.has(place.gitdir)) heads.set(place.gitdir, headOf(place.gitdir));
+		const head = place?.gitdir ? await heads.get(place.gitdir) : null;
+		const recent = await providerOf(session.id).recent?.(session.id).catch(() => "");
+		return { ...session, ...(place?.worktree ? { worktree: place.worktree } : {}), ...head, ...(recent ? { recent } : {}) };
+	}));
+}
 
 /**
  * 세션 폴더 하나를 제공자로. 파일은 `root` 아래 `depth` 단계 폴더 안에 있고 이름이 `match` 와 맞아야 한다.
@@ -94,6 +109,7 @@ const repoOf = (() => {
  */
 function jsonlProvider({ id, root, depth = 1, match = /\.jsonl$/, headBytes, meta, normalize, parse, events, stamp = async () => "" }) {
 	const metas = new Map();
+	const recents = new Map();
 	const walk = async (dir, level) => {
 		const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
 		const found = [];
@@ -130,7 +146,7 @@ function jsonlProvider({ id, root, depth = 1, match = /\.jsonl$/, headBytes, met
 					provider: id,
 					title: m.title,
 					project: m.cwd ? basename(m.cwd) : rel.split("/")[0],
-					...(m.cwd ? { repo: await repoOf(m.cwd) } : {}),
+					...(m.cwd ? { repo: (await gitPlaceOf(m.cwd))?.repo ?? null } : {}),
 					cwd: m.cwd,
 					started: m.started,
 					updated: st.mtime.toISOString(),
@@ -145,6 +161,20 @@ function jsonlProvider({ id, root, depth = 1, match = /\.jsonl$/, headBytes, met
 			const path = resolve(root, sid.slice(id.length + 1));
 			if (!path.startsWith(`${root}/`) || !path.endsWith(".jsonl")) throw httpError(400, "bad session id");
 			return path;
+		},
+		/** 최근 작업 한 줄. 파일이 바뀌었을 때만 꼬리를 다시 읽는다. */
+		async recent(sid) {
+			const path = this.pathOf(sid);
+			const st = await stat(path);
+			const cached = recents.get(path);
+			if (cached?.mtimeMs === st.mtimeMs) return cached.line;
+			let line = "";
+			for (const bytes of RECENT_TAIL_BYTES) {
+				line = recentLine(events(parse(await readTail(path, st.size, bytes))));
+				if (line || bytes >= st.size) break;
+			}
+			recents.set(path, { mtimeMs: st.mtimeMs, line });
+			return line;
 		},
 		/** 같은 파일(크기·수정 시각·stamp)이면 정규화 결과를 다시 쓴다. 질문·원문 보기·전사 보기가 함께 쓴다. */
 		async transcript(sid) {
@@ -231,6 +261,20 @@ async function readHead(path, bytes) {
 		const { bytesRead } = await fh.read(buf, 0, bytes, 0);
 		// 마지막 불완전한 줄은 파서가 버린다
 		return buf.subarray(0, bytesRead).toString("utf8");
+	} finally {
+		await fh.close();
+	}
+}
+
+/** 파일 끝 bytes 만큼. 잘린 첫 줄은 버린다. */
+async function readTail(path, size, bytes) {
+	const start = Math.max(0, size - bytes);
+	const fh = await open(path, "r");
+	try {
+		const buf = Buffer.alloc(size - start);
+		const { bytesRead } = await fh.read(buf, 0, buf.length, start);
+		const text = buf.subarray(0, bytesRead).toString("utf8");
+		return start > 0 ? text.slice(text.indexOf("\n") + 1) : text;
 	} finally {
 		await fh.close();
 	}
@@ -544,7 +588,7 @@ const handler = async (req, res) => {
 		if (req.method === "GET" && url.pathname === "/api/sessions") {
 			const all = (await Promise.all(providers.map((p) => p.list()))).flat();
 			all.sort((a, b) => (a.updated < b.updated ? 1 : -1));
-			return json(res, 200, all.slice(0, 200));
+			return json(res, 200, await describeSessions(all.slice(0, 200)));
 		}
 		if (req.method === "GET" && url.pathname === "/api/sessions/resolve") {
 			// 에이전트가 자기 세션 파일 경로를 알려 주면 도슨트 세션 id 로 바꾼다 (docent herdr, ADR 0044). 이 컴퓨터의 제공자만 본다.
@@ -687,8 +731,28 @@ async function closeTailscaleListener() {
 	return hostStatus();
 }
 
+/**
+ * 시작할 때 테일스케일 공유를 연다. 부팅 직후처럼 Tailscale 이 아직 주소를 받지 못했거나 그 주소에 열 수 없으면
+ * 서버를 끄지 않고 점점 간격을 늘려 다시 시도한다. loopback 은 그동안에도 응답한다. 설정창에서 끄면 멈춘다.
+ */
+const tsRetry = { timer: null, attempt: 0 };
+function keepOpeningTailscale() {
+	clearTimeout(tsRetry.timer);
+	tsRetry.timer = null;
+	openTailscaleListener().then(() => { tsRetry.attempt = 0; }, (error) => {
+		const wait = TAILSCALE_RETRY_MS[Math.min(tsRetry.attempt, TAILSCALE_RETRY_MS.length - 1)];
+		if (tsRetry.attempt === 0) console.error(`docent: 테일스케일 공유를 아직 열 수 없어요. ${wait / 1000}초 뒤부터 다시 시도해요 (${error.message})`);
+		tsRetry.attempt++;
+		tsRetry.timer = setTimeout(keepOpeningTailscale, wait);
+		tsRetry.timer.unref();
+	});
+}
+
 /** 켜고 끈 상태는 config.json 의 tailscale 에 저장해 재시작 뒤에도 유지한다. 옛 host=tailscale 설정은 여기로 옮겨 둔다. */
 async function setTailscaleShare(on) {
+	clearTimeout(tsRetry.timer);
+	tsRetry.timer = null;
+	tsRetry.attempt = 0;
 	if (on) await openTailscaleListener();
 	else await closeTailscaleListener();
 	CONFIG.tailscale = on;
@@ -712,14 +776,8 @@ for (const h of baseHosts) {
 		process.exit(1);
 	});
 }
-// host=tailscale 로 시작했으면 이미 열려 있는 테일스케일 대기를 상태로 기록하고,
-// 설정창에서 켜 둔 것(tailscale 참)이면 여기서 다시 연다. 실패해도 loopback 은 살아 있게 경고만 한다.
-if (HOST_INPUT === "tailscale" && HOST !== "127.0.0.1") {
-	tsShare.on = true;
-	tsShare.ip = HOST;
-} else if (CONFIG.tailscale === true) {
-	openTailscaleListener().catch((error) => console.error(`docent: 테일스케일 공유를 열지 못했어요 (${error.message})`));
-}
+// 옛 host=tailscale 설정이나 설정창에서 켜 둔 공유(tailscale 참)는 loopback 과 따로 연다. 실패해도 loopback 은 살아 있다.
+if (HOST_INPUT === "tailscale" || CONFIG.tailscale === true) keepOpeningTailscale();
 
 // 앱이 소유한 서버를 종료할 때 설명과 뒤늦은 학습 분류 프로세스도 함께 끝낸다.
 let stopping = false;

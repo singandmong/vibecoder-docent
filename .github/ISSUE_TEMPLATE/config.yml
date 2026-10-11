@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: 보안 취약점 제보
-    url: https://github.com/foxion37/vibecoder-docent/security/advisories/new
+    url: https://github.com/singandmong/vibecoder-docent/security/advisories/new
     about: 비공개로 제보합니다. 공개 이슈에는 쓰지 마세요.

@@ -1,6 +1,6 @@
 {
   "name": "vibecoder-docent",
-  "version": "0.18.1",
+  "version": "0.19.0",
   "private": true,
   "type": "module",
   "main": "app/desktop/main.cjs",
@@ -9,11 +9,11 @@
   "author": "foxion37",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/foxion37/vibecoder-docent.git"
+    "url": "git+https://github.com/singandmong/vibecoder-docent.git"
   },
-  "homepage": "https://github.com/foxion37/vibecoder-docent#readme",
+  "homepage": "https://github.com/singandmong/vibecoder-docent#readme",
   "bugs": {
-    "url": "https://github.com/foxion37/vibecoder-docent/issues"
+    "url": "https://github.com/singandmong/vibecoder-docent/issues"
   },
   "keywords": [
     "vibe-coding",

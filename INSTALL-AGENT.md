@@ -100,7 +100,7 @@ npm ls -g videcoder-docent   # 예전 이름 패키지가 남았는지
 공개 GitHub Release 패키지를 설치한다.
 
 ```sh
-npm install -g https://github.com/foxion37/vibecoder-docent/releases/latest/download/vibecoder-docent.tgz
+npm install -g https://github.com/singandmong/vibecoder-docent/releases/latest/download/vibecoder-docent.tgz
 docent --version
 ```
 

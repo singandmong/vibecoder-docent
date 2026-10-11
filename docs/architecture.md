@@ -78,7 +78,7 @@ docs/                     개념·범위·결정
 
 ## 웹앱 요청 흐름
 
-1. `GET /api/sessions` — 각 제공자의 세션 파일 머리만 읽어 제목·폴더·시각. 최신순 200개.
+1. `GET /api/sessions` — 각 제공자의 세션 파일 머리만 읽어 제목·폴더·시각. 최신순 200개. 이 200개에는 저장소(`repo`), 지금 브랜치(`branch`, `detached`), 워크트리 폴더(`worktree`), 전사 꼬리에서 고른 최근 작업 한 줄(`recent`)을 붙인다(ADR 0045).
 2. 프로필·세션을 고른다. 세션 목록은 최근 10개부터 보여 주고 "더 보기"로 늘린다. 세션을 고르면 작업 내용이 펼쳐지고, 카드를 누르면 그 카드의 대화 스레드가 열린다(ADR 0022). 스레드 식별자(`thread`)는 서버가 질문 대상 내용으로 발급하고, 대상이 없으면 `""`(세션 전체 대화)다. 즐겨찾기는 `GET/POST /api/favorites`로 프로필·세션·스레드별로 `learning.json`에 저장한다.
 3. `POST /api/ask {id, question, profileId, difficulty?, requestId, auto?, focus?, cards?}` — 같은 requestId 작업이 진행 중이면 합류, 저장된 결과가 있으면 재생, 없으면 작업을 연다. 작업: 요청 시작 저장 → 깊이 결정(이번 질문 선택 > 분야별 설정이 있을 때만 짧은 분야 판정 > 프로필 기본값) → 스레드 대화에 전사(또는 갱신분)·기억 후보 요약·이번 질문 맥락을 보내 설명 스트림 → 이 대화에 실제로 보낸 근거만 검증 → 문답·요청 완료 저장(`learning.classification: "pending"`) → 답을 돌려준 뒤 뒤에서 학습 분류(질문·질문 대상·최근 대화·방금 한 답·카드 목록·기억 후보)를 붙이고 라이브 연결로 `{kind: "record"}`를 알린다 (ADR 0032). `Accept: application/x-ndjson`이면 `stage`·`delta`·`steer`·`reset`과 끝줄(`answer`·`error`·`cancelled`)을 줄 단위로 보낸다.
 4. 설명 중 Esc/멈춤은 `POST /api/ask/cancel`(모델 호출을 끊고 문답을 남기지 않음, 요청은 `cancelled`), ⌘Enter/"지금 바로잡기"는 `POST /api/ask/steer`(같은 대화 맥락에서 다시 답함), Enter는 브라우저의 대기 질문. `GET /api/jobs`로 새로고침 뒤 진행 중 작업에 다시 붙는다 (ADR 0029).

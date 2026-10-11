@@ -19,6 +19,24 @@ const threadKey = (text) => {
 };
 /** 작업 폴더 이름. 워크트리처럼 저장소 이름과 다르면 "저장소/폴더" 로 보여 준다. */
 const placeOf = (session) => (session.repo && session.project && session.repo !== session.project ? `${session.repo}/${session.project}` : session.project || session.repo || "");
+/** 세션 카드 아이콘. DOCENT_SYMBOLS=ascii 또는 TERM=dumb 에서는 ASCII (ADR 0045). */
+const SESSION_ICONS = Object.freeze({
+	unicode: Object.freeze({ repo: "📦", folder: "📁", branch: "🌿", worktree: "🌳", recent: "🕘", current: "✓" }),
+	ascii: Object.freeze({ repo: "[R]", folder: "[D]", branch: "br:", worktree: "wt:", recent: ">", current: "*" }),
+});
+
+/** 목록에서 고르기 쉬운 상대 시각. 일주일이 넘으면 날짜. */
+export function agoLabel(value, now = Date.now()) {
+	const time = Date.parse(value ?? "");
+	if (!Number.isFinite(time)) return "시각 정보 없음";
+	const minutes = Math.floor((now - time) / 60_000);
+	if (minutes < 1) return "방금";
+	if (minutes < 60) return `${minutes}분 전`;
+	if (minutes < 24 * 60) return `${Math.floor(minutes / 60)}시간 전`;
+	if (minutes < 7 * 24 * 60) return `${Math.floor(minutes / (24 * 60))}일 전`;
+	const date = new Date(time);
+	return `${date.getMonth() + 1}월 ${date.getDate()}일`;
+}
 
 function focusForEvent(event) {
 	const options = Array.isArray(event.options) ? event.options.map((option) => `${option.label ?? ""}${option.description ? ` — ${option.description}` : ""}`).join("\n") : "";
@@ -239,14 +257,37 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		items.push({ text: "─".repeat(width()), role: "borderAccent" });
 	};
 
+	/** 세션 카드: 어디(저장소, 브랜치, 워크트리)와 언제, 제목, 최근 작업 한 줄 (ADR 0045). */
+	const sessionCard = (session, selected, current) => {
+		const icons = SESSION_ICONS[symbols] ?? SESSION_ICONS.unicode;
+		const columns = width();
+		const place = [
+			session.repo
+				? theme.span("title", `${icons.repo} ${clipLine(session.repo, 28)}`)
+				: theme.span("path", `${icons.folder} ${clipLine(session.project || "작업 폴더 없음", 28)}`),
+			session.branch && theme.span("success", `${icons.branch} ${clipLine(session.branch, 32)}${session.detached ? " (브랜치 아님)" : ""}`),
+			session.worktree && theme.span("label", `${icons.worktree} ${clipLine(session.worktree, 24)}`),
+			current && theme.span("success", icons.current),
+		].filter(Boolean).join("  ");
+		const head = `${selected ? theme.span("title", " → ") : "   "}${place}`;
+		const meta = theme.span("dim", [session.provider || "제공자 미상", session.host, agoLabel(session.updated)].filter(Boolean).join(" • "));
+		const lines = [
+			visibleWidth(head) + visibleWidth(meta) + 2 <= columns ? `${head}  ${meta}` : truncateToWidth(head, columns),
+			`     ${theme.span(selected ? "title" : "text", clipLine(session.title || "제목 없음", columns - 6))}`,
+		];
+		if (session.recent) lines.push(`     ${theme.span("muted", `${icons.recent} ${clipLine(session.recent, columns - 9)}`)}`);
+		return lines;
+	};
+
 	function sessionsBody() {
 		const items = [];
 		pickerHeader(items, "세션 선택", "도슨트가 함께 읽을 작업 기록");
 		if (!state.sessions.length) add(items, " 세션이 없어요. 에이전트에서 대화를 시작한 뒤 Ctrl+R 로 새로고침하세요.", { role: "muted" });
 		for (let i = 0; i < state.sessions.length; i++) {
 			const session = state.sessions[i];
-			const where = [placeOf(session) || "작업 폴더 없음", session.provider || "제공자 미상", session.host].filter(Boolean).join(" • ");
-			pick(items, i === state.pickerIndex.sessions, session.title || "제목 없음", `${where} • ${dateLabel(session.updated)}`);
+			const selected = i === state.pickerIndex.sessions;
+			for (const text of sessionCard(session, selected, session.id === state.session?.id)) items.push({ text, role: "text", rich: true, selected });
+			if (i < state.sessions.length - 1) divider(items);
 		}
 		pickerFooter(items, state.sessions.length);
 		return items;
@@ -429,11 +470,13 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		const showFooter = !(completion.length && rows < 20);
 		const bodyHeight = Math.max(1, rows - header.length - (activity ? 1 : 0) - composer.length - completion.length - (showFooter ? 2 : 0));
 		const selectedLine = body.findIndex((item) => item.selected);
+		let selectedEnd = selectedLine; // 여러 줄 카드는 마지막 줄까지 보이게 한다
+		while (selectedEnd >= 0 && body[selectedEnd + 1]?.selected) selectedEnd++;
 		const maxScroll = Math.max(0, body.length - bodyHeight);
 		if (state.followBottom) state.bodyScroll = maxScroll;
 		else if (state.followSelection && selectedLine >= 0) {
 			if (selectedLine < state.bodyScroll) state.bodyScroll = selectedLine;
-			else if (selectedLine >= state.bodyScroll + bodyHeight) state.bodyScroll = selectedLine - bodyHeight + 1;
+			else if (selectedEnd >= state.bodyScroll + bodyHeight) state.bodyScroll = Math.min(selectedLine, selectedEnd - bodyHeight + 1);
 		}
 		state.bodyScroll = Math.max(0, Math.min(state.bodyScroll, maxScroll));
 		const visible = body.slice(state.bodyScroll, state.bodyScroll + bodyHeight);
@@ -593,8 +636,9 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	function sessionItems() {
 		return state.sessions.map((session) => ({
 			label: session.title || "제목 없음",
-			aliases: `${session.repo ?? ""} ${session.project ?? ""} ${session.provider ?? ""} ${session.host ?? ""}`,
-			description: `${[placeOf(session) || "작업 폴더 없음", session.provider, session.host].filter(Boolean).join(" • ")} • ${dateLabel(session.updated)}`,
+			aliases: `${session.repo ?? ""} ${session.project ?? ""} ${session.worktree ?? ""} ${session.branch ?? ""} ${session.provider ?? ""} ${session.host ?? ""}`,
+			description: session.recent ?? "",
+			card: (selected) => sessionCard(session, selected, session.id === state.session?.id),
 			current: session.id === state.session?.id,
 			run: () => void switchSession(session),
 		}));
@@ -703,12 +747,13 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		scheduleRender();
 	}
 
-	/** Pi SelectList rows under the editor: "→" marks the keyboard choice, descriptions stay muted. */
+	/** Pi SelectList rows under the editor: "→" marks the keyboard choice, descriptions stay muted. Session items draw as cards. */
 	function completionRows(completion) {
 		if (!completion) return [];
 		const rows = [];
 		const total = completion.items.length;
-		const max = Math.max(2, Math.min(8, height() - 14));
+		const linesPerItem = completion.items.some((item) => item.card) ? 3 : 1;
+		const max = Math.max(2, Math.min(8, Math.floor((height() - 14) / linesPerItem)));
 		const index = state.completion.index;
 		const start = Math.max(0, Math.min(index - Math.floor(max / 2), total - max));
 		const visible = completion.items.slice(start, start + max);
@@ -719,6 +764,11 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		if (!total && completion.empty) rows.push(theme.span("dim", `   ${completion.empty}`));
 		visible.forEach((item, offset) => {
 			const selected = start + offset === index;
+			if (item.card) {
+				const lines = item.card(selected);
+				rows.push(...lines, ...Array(Math.max(0, linesPerItem - lines.length)).fill("")); // 고를 때 입력창이 들썩이지 않게 높이를 맞춘다
+				return;
+			}
 			const label = clipLine(item.label, labelWidth);
 			const padded = label + " ".repeat(Math.max(0, labelWidth - visibleWidth(label)));
 			const mark = item.current ? theme.span("success", " ✓") : "  ";

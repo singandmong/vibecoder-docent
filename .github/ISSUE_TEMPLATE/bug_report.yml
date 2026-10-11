@@ -46,8 +46,8 @@ body:
     attributes:
       label: 설치 방법
       options:
-        - 릴리스 tgz (npm install -g https://github.com/foxion37/vibecoder-docent/releases/latest/download/vibecoder-docent.tgz)
-        - GitHub 저장소에서 설치 (npm install -g github:foxion37/vibecoder-docent)
+        - 릴리스 tgz (npm install -g https://github.com/singandmong/vibecoder-docent/releases/latest/download/vibecoder-docent.tgz)
+        - GitHub 저장소에서 설치 (npm install -g github:singandmong/vibecoder-docent)
         - 저장소를 클론해서 npm start
     validations:
       required: true

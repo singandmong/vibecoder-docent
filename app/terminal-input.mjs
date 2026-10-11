@@ -5,6 +5,9 @@ const CSI_KEYS = new Map([
 	["\u001b[H", "home"], ["\u001b[F", "end"], ["\u001b[1~", "home"], ["\u001b[4~", "end"],
 	["\u001b[7~", "home"], ["\u001b[8~", "end"], ["\u001b[3~", "delete"],
 	["\u001b[5~", "pageup"], ["\u001b[6~", "pagedown"], ["\u001b[Z", "shift-tab"],
+	// Application cursor mode (SS3), sent by Herdr, tmux and some terminals.
+	["\u001bOA", "up"], ["\u001bOB", "down"], ["\u001bOC", "right"], ["\u001bOD", "left"],
+	["\u001bOH", "home"], ["\u001bOF", "end"],
 ]);
 const ESC_PREFIXES = [...CSI_KEYS.keys(), PASTE_START];
 const MAX_PASTE_CHARS = 32_000;

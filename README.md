@@ -28,7 +28,7 @@ Vibecoder Docent explains coding-agent sessions in plain Korean without changing
 쓰고 있는 코딩 에이전트(Claude Code 터미널이나 Claude 앱, Codex CLI나 Codex 앱, omp 등)에게 아래 한 줄만 보내면 에이전트가 확인과 설치를 하면서 필요한 것만 선택지로 묻는다. 질문은 각 에이전트에 내장된 질문 기능(Claude Code의 선택 화면, Codex의 질문 등)으로 나온다. 사용자는 고르기만 하고, 직접 할 일은 omp 로그인뿐이다 (ADR 0041·0042).
 
 ```text
-https://github.com/foxion37/vibecoder-docent/blob/main/INSTALL-AGENT.md 를 읽고 바이브코더 도슨트를 설치해줘
+https://github.com/singandmong/vibecoder-docent/blob/main/INSTALL-AGENT.md 를 읽고 바이브코더 도슨트를 설치해줘
 ```
 
 Codex CLI는 기본 설정에서 질문을 글로 보여 주므로 번호나 이름으로 답한다. 선택 화면으로 고르려면 `codex --enable default_mode_request_user_input`으로 실행한다(Codex의 개발 중 기능).
@@ -41,17 +41,17 @@ Node.js 22.19 이상이 필요하다. macOS·Linux·Windows 모두 같은 명령
 
 ```sh
 # 공개 GitHub Release 패키지
-npm install -g https://github.com/foxion37/vibecoder-docent/releases/latest/download/vibecoder-docent.tgz
+npm install -g https://github.com/singandmong/vibecoder-docent/releases/latest/download/vibecoder-docent.tgz
 
 # 저장소에서 바로 설치해도 같다
-npm install -g github:foxion37/vibecoder-docent
+npm install -g github:singandmong/vibecoder-docent
 ```
 
 설치 없이 바로 실행할 수도 있다.
 
 ```sh
-npx github:foxion37/vibecoder-docent    # npm
-bunx github:foxion37/vibecoder-docent   # bun
+npx github:singandmong/vibecoder-docent    # npm
+bunx github:singandmong/vibecoder-docent   # bun
 ```
 
 Windows에서는 PowerShell이나 명령 프롬프트에서 `docent`를 실행하면 기본 브라우저로 열린다.
@@ -115,10 +115,12 @@ docent-tui --url https://내-컴퓨터.내-사설망.ts.net
 
 입력창에 기호를 쓰면 바로 아래에 선택 목록이 열린다. 단축키를 외우지 않아도 `/` 하나로 모든 기능을 찾을 수 있다 (ADR 0039).
 
+세션 목록은 세션마다 세 줄 카드다. 첫 줄은 📦 저장소, 🌿 브랜치, 🌳 워크트리(연결된 워크트리일 때), 지금 세션 ✓, 흐린 글자로 제공자와 상대 시각. 둘째 줄은 세션 제목, 셋째 줄은 🕘 최근 작업 한 줄(에이전트 마지막 답의 첫 문장, 없으면 마지막 요청)이다. 브랜치는 세션 당시가 아니라 지금 그 폴더의 브랜치다 (ADR 0045).
+
 | 입력 | 열리는 목록 |
 |---|---|
 | `/` | 명령: 세션, 대화, 답변, 설정, 새로고침, 종료. 설명 중에는 바로잡기와 중단 |
-| `@` | 세션 고르기. `@결제`처럼 이어 쓰면 제목, 작업 폴더, 제공자로 거름 |
+| `@` | 세션 고르기. `@결제`, `@chart-v3`처럼 이어 쓰면 제목, 저장소, 워크트리, 브랜치, 최근 작업, 제공자로 거름 |
 | `#` | 대화 고르기. 세션 전체 대화, 사건 카드, 저장된 대화 |
 | `$` | 설정: 기본 설명 깊이(EASY, NORMAL, HARD), 미리 설명 켜기와 끄기, 설명 모델, 프로필 바꾸기 |
 

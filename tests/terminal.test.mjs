@@ -3,7 +3,7 @@ import test from "node:test";
 import { TerminalClient } from "../app/terminal-client.mjs";
 import { TerminalInput, terminalSafeText } from "../app/terminal-input.mjs";
 import { PassThrough, Writable } from "node:stream";
-import { runTerminal } from "../app/terminal-ui.mjs";
+import { agoLabel, runTerminal } from "../app/terminal-ui.mjs";
 import { fixture, until } from "./omp-fixture.mjs";
 import { createServer, request } from "node:http";
 import { once } from "node:events";
@@ -86,6 +86,27 @@ test("raw UTF-8 key input keeps committed Korean text separate from Enter", () =
 	assert.equal(events.filter((event) => event.type === "text").map((event) => event.text).join(""), "한글 질문");
 	assert.deepEqual(events.at(-1), { type: "key", key: "enter" });
 	input.close();
+});
+
+test("application cursor mode arrows are keys, not typed text, even when split", () => {
+	const events = [];
+	const input = new TerminalInput((event) => events.push(event));
+	input.feed("\u001bOB\u001b");
+	input.feed("OA");
+	assert.deepEqual(events, [{ type: "key", key: "down" }, { type: "key", key: "up" }]);
+	input.close();
+});
+
+test("session card time switches unit at the hour, day and week boundaries", () => {
+	const now = Date.parse("2026-10-11T12:00:00Z");
+	const ago = (ms) => agoLabel(new Date(now - ms).toISOString(), now);
+	const minute = 60_000, hour = 60 * minute, day = 24 * hour;
+	assert.deepEqual(
+		[ago(59_999), ago(minute), ago(hour - 1), ago(hour), ago(day - 1), ago(day), ago(7 * day - 1)],
+		["방금", "1분 전", "59분 전", "1시간 전", "23시간 전", "1일 전", "6일 전"],
+	);
+	assert.match(ago(7 * day), /^\d+월 \d+일$/);
+	assert.equal(agoLabel("not a date", now), "시각 정보 없음");
 });
 
 test("SSE and NDJSON readers handle split UTF-8 stream chunks", async () => {

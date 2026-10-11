@@ -2,6 +2,19 @@
 
 형식: [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/). 버전은 [SemVer](https://semver.org/lang/ko/). 0.x 동안은 minor 가 새 기능, patch 가 고침.
 
+## [0.19.0] — 2026-10-11
+
+### 추가
+- 터미널 세션 선택창(`@` 목록과 첫 화면 목록)을 세 줄 카드로 바꿈. 📦 저장소, 🌿 브랜치, 🌳 워크트리, 지금 세션 ✓, 제공자와 상대 시각, 세션 제목, 🕘 최근 작업 한 줄을 색으로 구분해 보여 줌. `@` 검색은 브랜치, 워크트리, 최근 작업도 찾음. `GET /api/sessions`가 `branch`, `detached`, `worktree`, `recent`를 함께 돌려줌. 최근 작업은 모델을 부르지 않고 에이전트 마지막 답의 첫 문장(없으면 마지막 요청)에서 고름 (ADR 0045).
+
+### 고침
+- Herdr, tmux처럼 방향키를 `ESC O A` 형식(application cursor 모드)으로 보내는 터미널에서 `@` 목록의 화살표 키가 `OBOA` 같은 글자로 입력되고 선택이 안 되던 문제.
+- 부팅 직후 Tailscale보다 서버가 먼저 뜨면 `tailscale ip 를 알 수 없어요`나 `listen EADDRNOTAVAIL`로 서버 전체가 꺼지고 launchd가 재시작을 되풀이하던 문제. 127.0.0.1은 바로 열고, 테일스케일 대기는 열릴 때까지 5초, 10초, 30초, 60초 간격으로 다시 시도함. 옛 `host: "tailscale"` 설정도 같음 (ADR 0046).
+- 맥북처럼 omp가 Nerd Font 기호 모드인 컴퓨터의 세션 제목이 웹, PiP, 모바일, macOS 앱에서 맨 앞에 빈 네모나 알 수 없는 기호로 보이던 문제. 웹은 제목 맨 앞의 Nerd Font 아이콘을 빼고 `RECORD: 제목`처럼 보여 줌. 터미널과 서버 응답은 그대로 (ADR 0047).
+
+### 변경
+- 저장소가 `singandmong/vibecoder-docent`로 옮겨진 것에 맞춰 설치 주소, 저장소 링크, 보안 제보 주소를 새 주소로 바꿈. 옛 `foxion37/vibecoder-docent` 주소는 GitHub가 새 주소로 넘겨 줌.
+
 ## [0.18.1] — 2026-10-11
 
 ### 고침
