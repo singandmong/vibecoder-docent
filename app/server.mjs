@@ -18,6 +18,7 @@ import { extractTerms, filterTerms, glossary } from "./review.mjs";
 import { KEYWORD_PROMPT, extractInput, parseExtract, wiki } from "./wiki.mjs";
 import { parseAnswer } from "./slots.mjs";
 import { parsePeers, peerProvider } from "./peers.mjs";
+import { repoNameOf } from "./repo.mjs";
 import { config, favorites, history, saveConfig, saveKeywords, setFavorite } from "./store.mjs";
 import { extractCitations, prepareEvidence, resolveEvidence } from "./evidence.mjs";
 import { modelCatalog, selectedModel } from "./models.mjs";
@@ -77,20 +78,13 @@ async function resolveHost(host) {
 	return ip;
 }
 
-/** 작업 폴더가 속한 git 저장소 이름. 위로 올라가며 .git 을 찾고, 결과는 폴더별로 기억한다. */
+/** 작업 폴더가 속한 git 저장소 이름. 결과는 폴더별로 기억한다. */
 const repoOf = (() => {
 	const cache = new Map();
 	return async (cwd) => {
 		if (!cwd) return null;
-		if (cache.has(cwd)) return cache.get(cwd);
-		let out = null;
-		let dir = cwd;
-		for (let i = 0; i < 8 && dir && dir !== "/"; i++) {
-			if (await stat(join(dir, ".git")).then(() => true).catch(() => false)) { out = basename(dir); break; }
-			dir = dirname(dir);
-		}
-		cache.set(cwd, out);
-		return out;
+		if (!cache.has(cwd)) cache.set(cwd, await repoNameOf(cwd));
+		return cache.get(cwd);
 	};
 })();
 

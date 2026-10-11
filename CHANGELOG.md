@@ -2,6 +2,11 @@
 
 형식: [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/). 버전은 [SemVer](https://semver.org/lang/ko/). 0.x 동안은 minor 가 새 기능, patch 가 고침.
 
+## [0.18.1] — 2026-10-11
+
+### 고침
+- 워크트리에서 연 세션의 저장소 이름이 워크트리 폴더 이름으로 나오던 문제. 워크트리의 `.git` 파일(`gitdir: …/.git/worktrees/…`)에서 원래 저장소를 찾아, 세션 목록에 `RELAYER3 chart-v3`처럼 저장소 이름을 먼저 보여 줌. 터미널 화면은 `RELAYER3/chart-v3`로 표시.
+
 ## [0.18.0] — 2026-10-07
 
 ### 추가

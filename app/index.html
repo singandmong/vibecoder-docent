@@ -1253,8 +1253,8 @@ function renderSessions() {
     const live = Date.now() - new Date(s.updated) < 10 * 60 * 1000;
     b.append(el("span", "t", s.title));
     const meta = el("span", "m");
-    meta.append(el("span", "session-meta project", s.project));
     if (s.repo && s.repo !== s.project) meta.append(el("span", "session-meta repo", s.repo));
+    meta.append(el("span", "session-meta project", s.project));
     meta.append(el("span", "session-meta platform", s.provider));
     if (s.host) meta.append(el("span", "session-meta host", s.host));
     meta.append(el("span", `session-meta ${live ? "activity" : "time"}`, `${live ? "최근 활동, " : ""}${rel(s.updated)}`));

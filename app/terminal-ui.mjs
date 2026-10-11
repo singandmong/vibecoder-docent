@@ -17,6 +17,8 @@ const threadKey = (text) => {
 	const normalized = normalizedThreadText(text);
 	return normalized ? createHash("sha256").update(normalized).digest("hex").slice(0, 16) : "";
 };
+/** 작업 폴더 이름. 워크트리처럼 저장소 이름과 다르면 "저장소/폴더" 로 보여 준다. */
+const placeOf = (session) => (session.repo && session.project && session.repo !== session.project ? `${session.repo}/${session.project}` : session.project || session.repo || "");
 
 function focusForEvent(event) {
 	const options = Array.isArray(event.options) ? event.options.map((option) => `${option.label ?? ""}${option.description ? ` — ${option.description}` : ""}`).join("\n") : "";
@@ -243,7 +245,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		if (!state.sessions.length) add(items, " 세션이 없어요. 에이전트에서 대화를 시작한 뒤 Ctrl+R 로 새로고침하세요.", { role: "muted" });
 		for (let i = 0; i < state.sessions.length; i++) {
 			const session = state.sessions[i];
-			const where = [session.project || "작업 폴더 없음", session.provider || "제공자 미상", session.host].filter(Boolean).join(" • ");
+			const where = [placeOf(session) || "작업 폴더 없음", session.provider || "제공자 미상", session.host].filter(Boolean).join(" • ");
 			pick(items, i === state.pickerIndex.sessions, session.title || "제목 없음", `${where} • ${dateLabel(session.updated)}`);
 		}
 		pickerFooter(items, state.sessions.length);
@@ -403,7 +405,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		const segments = statusSegments({
 			ask: state.ask,
 			spinnerFrame,
-			session: state.session ? { ...state.session, title: clipLine(state.session.title || state.session.id, third), project: clipLine(state.session.project || state.session.provider || "", Math.floor(third * 0.75)) } : null,
+			session: state.session ? { ...state.session, title: clipLine(state.session.title || state.session.id, third), project: clipLine(placeOf(state.session) || state.session.provider || "", Math.floor(third * 0.75)) } : null,
 			conversation: clipLine(state.thread ? state.focus?.label || "선택한 대화" : "세션 전체 대화", third),
 			scroll,
 			modelName: clipLine(selector ? model?.name || selector : "기본 모델", 28),
@@ -591,8 +593,8 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	function sessionItems() {
 		return state.sessions.map((session) => ({
 			label: session.title || "제목 없음",
-			aliases: `${session.project ?? ""} ${session.provider ?? ""} ${session.host ?? ""}`,
-			description: `${[session.project || "작업 폴더 없음", session.provider, session.host].filter(Boolean).join(" • ")} • ${dateLabel(session.updated)}`,
+			aliases: `${session.repo ?? ""} ${session.project ?? ""} ${session.provider ?? ""} ${session.host ?? ""}`,
+			description: `${[placeOf(session) || "작업 폴더 없음", session.provider, session.host].filter(Boolean).join(" • ")} • ${dateLabel(session.updated)}`,
 			current: session.id === state.session?.id,
 			run: () => void switchSession(session),
 		}));
