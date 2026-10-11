@@ -16,7 +16,7 @@
   @media (prefers-color-scheme: dark) {
     html:not([data-theme="light"]) { color-scheme:dark; --bg:#141414; --panel:#1e1e1e; --line:#333; --ink:#ececea; --mute:#9a9a94; --accent:#FFD600; --accent-ink:#FFD600; --done:#65bd87; --run:#e4b35d; --blk:#f18080; --hover:#2a2718; --soft:#3a3413; --btn:#252525; --btn-hover:#302b16; --on-accent:#141414; --on-status:#141414; }
   }
-  :root { --platform:light-dark(#2456a6,#93b8f5); --project:light-dark(#725095,#c3a6e2); --host:light-dark(#286a6a,#85c9c6); --activity:light-dark(#876014,#e4be72); }
+  :root { --platform:light-dark(#2456a6,#93b8f5); --project:light-dark(#725095,#c3a6e2); --host:light-dark(#286a6a,#85c9c6); --activity:light-dark(#876014,#e4be72); --branch:light-dark(#2c7339,#8fd19e); }
   * { box-sizing:border-box }
   [hidden] { display:none !important }
   /* 닫힌 details 의 내용은 레이아웃 상자조차 남기지 않는다. 절대 위치 팝업이 창 밖으로 넘치는 걸 막는다. */
@@ -49,9 +49,13 @@
   .sess:hover { background:var(--hover) } .sess.on { background:var(--soft) }
   .sess:focus-visible { outline:2px solid var(--accent-ink); outline-offset:-3px }
   .sess .t { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; font-size:14px; line-height:1.45; font-weight:400; letter-spacing:-.02em }
+  .sess .r { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; line-height:1.6; margin-top:6px; color:var(--mute) }
   .sess .m { display:flex; flex-wrap:wrap; gap:4px 12px; font-size:12px; margin-top:10px; line-height:1.6 }
   .session-meta { min-width:0; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-  .session-meta.repo { color:var(--project) }
+  .session-meta.repo, .session-meta.worktree { color:var(--project) }
+  .session-meta.branch { display:inline-flex; align-items:center; gap:3px; color:var(--branch) }
+  .session-meta.branch svg { flex:0 0 auto; width:12px; height:12px }
+  .session-meta.branch span { min-width:0; overflow:hidden; text-overflow:ellipsis }
   .session-meta.platform { color:var(--platform) }
   .session-meta.project { color:var(--project) }
   .session-meta.host { color:var(--host) }
@@ -658,6 +662,15 @@ const rel = (iso) => {
   if (s < 60) return "방금"; if (s < 3600) return `${Math.floor(s / 60)}분 전`;
   if (s < 86400) return `${Math.floor(s / 3600)}시간 전`; return `${Math.floor(s / 86400)}일 전`;
 };
+const BRANCH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10"/><path d="M18 9c0 5-6 4-12 8"/></svg>';
+/** 지금 그 폴더의 git 브랜치. 브랜치가 아닌 커밋이면 짧은 커밋 id 와 (브랜치 아님). */
+const branchChip = (s) => {
+  const chip = el("span", "session-meta branch");
+  chip.title = s.detached ? "브랜치가 아닌 커밋" : "브랜치";
+  chip.innerHTML = BRANCH_SVG;
+  chip.append(el("span", "", s.detached ? `${s.branch} (브랜치 아님)` : s.branch));
+  return chip;
+};
 
 async function api(url, method = "GET", data) {
   const res = await fetch(url, { method, ...(data === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(data) }) });
@@ -1248,7 +1261,7 @@ function renderSessions() {
   const query = $("#filter").value.trim().toLowerCase();
   const box = $("#sessions"); box.textContent = "";
   const pool = sideTab === "all" ? sessions : sessions.filter((s) => s.host === sideTab);
-  const matches = query ? pool.filter((s) => [s.title, s.project, s.cwd, s.first, s.host].some((value) => value?.toLowerCase().includes(query))) : pool;
+  const matches = query ? pool.filter((s) => [s.title, s.repo, s.project, s.worktree, s.branch, s.recent, s.cwd, s.first, s.host].some((value) => value?.toLowerCase().includes(query))) : pool;
   $("#count").textContent = matches.length;
   const limit = Math.max(sessionLimit, matches.findIndex((s) => s.id === current?.id) + 1);
   for (const s of matches.slice(0, limit)) {
@@ -1257,9 +1270,12 @@ function renderSessions() {
     b.title = s.title;
     const live = Date.now() - new Date(s.updated) < 10 * 60 * 1000;
     b.append(el("span", "t", s.title));
+    if (s.recent) { const recent = el("span", "r", s.recent); recent.title = `최근 작업: ${s.recent}`; b.append(recent); }
     const meta = el("span", "m");
-    if (s.repo && s.repo !== s.project) meta.append(el("span", "session-meta repo", s.repo));
-    meta.append(el("span", "session-meta project", s.project));
+    if (s.repo) meta.append(el("span", "session-meta repo", s.repo));
+    if (s.worktree) { const tree = el("span", "session-meta worktree", s.worktree); tree.title = "워크트리"; meta.append(tree); }
+    if (!s.repo || (s.project !== s.repo && s.project !== s.worktree)) meta.append(el("span", "session-meta project", s.project));
+    if (s.branch) meta.append(branchChip(s));
     meta.append(el("span", "session-meta platform", s.provider));
     if (s.host) meta.append(el("span", "session-meta host", s.host));
     meta.append(el("span", `session-meta ${live ? "activity" : "time"}`, `${live ? "최근 활동, " : ""}${rel(s.updated)}`));
