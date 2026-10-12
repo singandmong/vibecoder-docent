@@ -2,7 +2,8 @@
 
 ```
 prompt/docent.md          코어. 호스트 중립 프롬프트. 유일한 진실.
-app/server.mjs            로컬 웹앱 서버. 세션 목록·정규화 전사 캐시·HTTP 경로. 설명 요청은 ask.mjs 에 맡기고 NDJSON 스트림/JSON으로 응답
+app/server.mjs            로컬 웹앱 서버. 조립과 HTTP 경로. 세션은 catalog.mjs, 설명 요청은 ask.mjs 에 맡기고 NDJSON 스트림/JSON으로 응답
+app/catalog.mjs           세션 목록 module: 이 컴퓨터의 제공자(호스트 adapter + 정규화 전사 캐시)와 다른 컴퓨터의 제공자를 같은 interface 로, 세션 id → 제공자(모르면 400), 합친 목록(최근 활동 순 200개, 꾸미기는 세션의 제공자가), 파일 경로 → 세션 id(목록과 같은 depth·match 규칙) (ADR 0056)
 app/ask.mjs               설명 요청 module: 작업 열기·합류·재생, 사용자 질문 우선 게이트, 같은 스레드 순서 실행, 설명 → 근거 → 저장 → 뒤에서 학습 분류. runner 를 받아 쓴다 (ADR 0050)
 app/runner.mjs            omp 실행 정책 한곳: 사용자 전역 설정 격리, 한 번 호출(-p)과 RPC 대화, 중단·바로잡기 (ADR 0028)
 app/depth.mjs             설명 깊이 module: 고른 깊이 > 분야 판정(분야별 설정이 있을 때만) > 기본값, 판정 실패 규칙, thinking 표. 터미널 상태줄도 같은 표를 씀 (ADR 0028·0040·0051)
@@ -17,19 +18,21 @@ app/store.mjs             문답·요청 기록 module: learning.json 원자적 
 app/learning.mjs          프로필 설정·의미 분류 계획(전사 없이)·핵심 단어·학습 상태·관련 기억 (ADR 0014·0030)
 app/thread.mjs            스레드 식별자: 질문 대상 내용(공백 차이 무시)의 해시, "" 는 세션 전체 대화. 문답마다 스레드를 붙이고, 같은 세션의 앞선 답을 다시 설명한 문답은 그 답의 스레드에 둔다 (ADR 0022·0052·0053)
 app/conversations.mjs     대화 목록과 스레드 소속(서버·웹·터미널 공용, 브라우저에도 정적 파일로 제공): 서버가 붙인 thread 로만 소속을 정함, 세션 전체 대화 + 사건 카드 + 카드 없는 저장 대화(마지막 활동 순), 질문과 함께 보낼 카드 목록 정리, 카드·답의 질문 대상 모양 (ADR 0053)
+app/session-client.mjs    설명 요청의 화면 쪽 상태 module(웹·터미널 공용, 브라우저에도 정적 파일로 제공): 진행 중인 설명, 대기 질문(순서대로, 다른 세션·프로필 것은 보내지 않음), 중단한 질문을 그 자리의 빈 입력창에 되돌리기, 바로잡기, 같은 requestId 로 다시 붙기(받은 글을 비우고 시작), 끊긴 연결 다시 붙기, 미리 설명 따라가기, 실시간 사건 다시 붙기. 화면은 onChange 알림을 그리기만 함 (ADR 0029·0055)
+app/transport.mjs         서버와 주고받는 transport adapter(웹·터미널 공용, 브라우저에도 정적 파일로 제공): JSON 요청, NDJSON 설명 스트림, SSE 실시간 사건, 서버 {error} 문구와 HTTP 상태를 TransportError 로 (ADR 0055)
 app/models.mjs            omp 채팅 모델 카탈로그·단가·정확한 selector 검증 (ADR 0016)
 app/evidence.mjs          소스 검증·근거 추출·원문 위치와 주변 맥락 해석 (ADR 0014)
 app/review.mjs            답 속 용어 링크용 용어집: 저장된 핵심 단어 + `용어(풀이)` 규칙 추출
 app/wiki.mjs              배운 내용 다시보기 용어 사전: 핵심 단어 검증·집계·옛 문답 일괄 추출 (ADR 0020)
 app/trim.mjs              긴 전사 줄이기: 120,000자 넘으면 앞 턴은 사용자 발화만, 최근 턴은 그대로 (ADR 0009)
-app/peers.mjs             원격 세션 목록·전사·라이브 제공자 (ADR 0011·0014)
+app/peers.mjs             다른 컴퓨터의 제공자: 원격 세션 목록·전사·라이브, 문답은 가져오지 않음. interface 는 catalog.mjs (ADR 0011·0014·0056)
 app/dialogue.mjs          질문 대상 검증, 사건 카드의 질문 대상·스레드·미리 설명 요청문, 분류용 최근 대화 (ADR 0022·0028)
 app/slots.mjs             답 → {status, headline, explain, details[]}, Markdown 블록 보존 (ADR 0017)
-app/index.html            세션·작업 내용·카드별 대화·즐겨찾기·설정·배운 내용 다시보기·PiP. Streamdown 로컬 자산으로 Markdown 표시. 대화 목록과 스레드 소속은 /conversations.mjs (ADR 0015·0017·0053)
+app/index.html            세션·작업 내용·카드별 대화·즐겨찾기·설정·배운 내용 다시보기·PiP. Streamdown 로컬 자산으로 Markdown 표시. 대화 목록과 스레드 소속은 /conversations.mjs, 서버와 주고받기는 /transport.mjs, 설명 요청 상태는 /session-client.mjs (ADR 0015·0017·0053·0055)
 app/mobile.css           600px 이하 단일 화면 탐색, 터치와 화면 키보드 레이아웃
 app/mobile.mjs           PWA 설치, 연결 안내, 모바일 표시 상태
 app/sw.js                개인 기록 없는 오프라인 안내만 캐시
-app/terminal-ui.mjs       터미널 클라이언트 화면: 대화, 입력창, 기호 메뉴, 선택 목록. 대화 목록과 스레드 소속은 conversations.mjs (ADR 0038·0039·0053)
+app/terminal-ui.mjs       터미널 클라이언트 화면: 대화, 입력창(자리별 초안), 대기 질문, 기호 메뉴, 선택 목록. 대화 목록과 스레드 소속은 conversations.mjs, 설명 요청 상태는 session-client.mjs (ADR 0038·0039·0053·0055)
 app/terminal-status.mjs   터미널 상태줄 규칙 표와 그리기, 좁은 화면 항목 빼기 (ADR 0040)
 app/terminal-markdown.mjs Pi Markdown 렌더러 연결과 제어 문자 차단 (ADR 0038)
 app/terminal-theme.mjs    OMP titanium 역할별 색 (ADR 0038)
@@ -80,14 +83,16 @@ docs/                     개념·범위·결정
 
 ## 세션 제공자
 
-`app/server.mjs` 의 `providers` 배열. 호스트 adapter 하나를 `jsonlProvider(adapter)` 로 감싼다. adapter 는 `{id, dir, depth, match, headBytes, meta(head, path), transcript(text, path), events(chunk), stamp?(path)}` 이고 줄 해석, 숨김·제목 규칙, 작업 폴더 찾기를 안에 가진다 (ADR 0054). 지금은 `omp`(`~/.omp/agent/sessions/*/*.jsonl`), `claude`(`~/.claude/projects/*/*.jsonl`, 서브에이전트 파일을 `stamp`로 캐시 기준에 포함), `codex`(`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`), `gemini`(`~/.gemini/tmp/*/chats/session-*.jsonl`, 작업 폴더는 `.project_root`), `pi`(`~/.pi/agent/sessions/*/*.jsonl`). 목록은 바뀐 파일의 머리만 다시 읽는다. 새 호스트는 adapter 모듈 하나 + 배열 한 줄. 전사 출력 모양(`## user` / `## assistant` / `→ 도구(…) ⇒ ok·에러·사용자 답`, AI의 질문은 질문 문장·선택지 포함)은 호스트가 달라도 같아야 한다. 도슨트는 구분하지 않는다. 머리말의 작업 폴더를 모르면 `?` 로 적고, 학습 범위는 이를 작업 폴더 없음으로 읽는다.
+`app/catalog.mjs` 의 `sessionCatalog(providers)` 가 세션 목록 module 이다 (ADR 0056). 제공자는 이 컴퓨터의 것(`localProviders`)과 다른 컴퓨터의 것(`peerProvider`) 모두 `{id, host, owns, check, list, describe, transcript, watch, idOf}` 를 낸다. 서버의 `/api/sessions`, `/api/sessions/resolve`, `/api/transcript`, `/api/live`, 미리 설명 감시, 설명 요청의 전사는 모두 이 module 에 위임한다. 세션 자리는 제공자 폴더 아래 `depth` 단계 폴더 안, 이름이 `match` 와 맞는 파일이고, 목록 걷기·id → 경로·경로 → id 가 같은 규칙을 쓴다. 목록에 없는 자리의 id 는 400, 경로는 404.
+
+이 컴퓨터의 제공자는 호스트 adapter 하나를 감싼다. adapter 는 `{id, dir, depth, match, headBytes, meta(head, path), transcript(text, path), events(chunk), stamp?(path)}` 이고 줄 해석, 숨김·제목 규칙, 작업 폴더 찾기를 안에 가진다 (ADR 0054). 지금은 `omp`(`~/.omp/agent/sessions/*/*.jsonl`), `claude`(`~/.claude/projects/*/*.jsonl`, 서브에이전트 파일을 `stamp`로 캐시 기준에 포함), `codex`(`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`), `gemini`(`~/.gemini/tmp/*/chats/session-*.jsonl`, 작업 폴더는 `.project_root`), `pi`(`~/.pi/agent/sessions/*/*.jsonl`). 목록은 바뀐 파일의 머리만 다시 읽는다. 새 호스트는 adapter 모듈 하나 + 서버의 `localProviders` 배열 한 줄. 전사 출력 모양(`## user` / `## assistant` / `→ 도구(…) ⇒ ok·에러·사용자 답`, AI의 질문은 질문 문장·선택지 포함)은 호스트가 달라도 같아야 한다. 도슨트는 구분하지 않는다. 머리말의 작업 폴더를 모르면 `?` 로 적고, 학습 범위는 이를 작업 폴더 없음으로 읽는다.
 
 ## 웹앱 요청 흐름
 
 1. `GET /api/sessions` — 각 제공자의 세션 파일 머리만 읽어 제목·폴더·시각. 최신순 200개. 이 200개에는 저장소(`repo`), 지금 브랜치(`branch`, `detached`), 워크트리 폴더(`worktree`), 전사 꼬리에서 고른 최근 작업 한 줄(`recent`)을 붙인다(ADR 0045).
 2. 프로필·세션을 고른다. 세션 목록은 최근 10개부터 보여 주고 "더 보기"로 늘린다. 세션을 고르면 작업 내용이 펼쳐지고, 카드를 누르면 그 카드의 대화 스레드가 열린다(ADR 0022). 스레드 식별자(`thread`)는 서버가 질문 대상 내용으로 발급하고, 대상이 없으면 `""`(세션 전체 대화)다. 즐겨찾기는 `GET/POST /api/favorites`로 프로필·세션·스레드별로 `learning.json`에 저장한다.
 3. `POST /api/ask {id, question, profileId, difficulty?, requestId, auto?, focus?, cards?}` — 같은 requestId 작업이 진행 중이면 합류, 저장된 결과가 있으면 재생, 없으면 작업을 연다. 작업: 요청 시작 저장 → 깊이 결정(이번 질문 선택 > 분야별 설정이 있을 때만 짧은 분야 판정 > 프로필 기본값) → 스레드 대화에 전사(또는 갱신분)·기억 후보 요약·이번 질문 맥락을 보내 설명 스트림 → 이 대화에 실제로 보낸 근거만 검증 → 문답·요청 완료 저장(`learning.classification: "pending"`) → 답을 돌려준 뒤 뒤에서 학습 분류(질문·질문 대상·최근 대화·방금 한 답·카드 목록·기억 후보)를 붙이고 라이브 연결로 `{kind: "record"}`를 알린다 (ADR 0032). `Accept: application/x-ndjson`이면 `stage`·`delta`·`steer`·`reset`과 끝줄(`answer`·`error`·`cancelled`)을 줄 단위로 보낸다.
-4. 설명 중 Esc/멈춤은 `POST /api/ask/cancel`(모델 호출을 끊고 문답을 남기지 않음, 요청은 `cancelled`), ⌘Enter/"지금 바로잡기"는 `POST /api/ask/steer`(같은 대화 맥락에서 다시 답함), Enter는 브라우저의 대기 질문. `GET /api/jobs`로 새로고침 뒤 진행 중 작업에 다시 붙는다 (ADR 0029).
+4. 설명 중 Esc/멈춤은 `POST /api/ask/cancel`(모델 호출을 끊고 문답을 남기지 않음, 요청은 `cancelled`), ⌘Enter/"지금 바로잡기"는 `POST /api/ask/steer`(같은 대화 맥락에서 다시 답함), Enter는 대기 질문. `GET /api/jobs`로 새로고침 뒤 진행 중 작업에 다시 붙는다 (ADR 0029). 이 화면 쪽 규칙은 웹과 터미널이 `session-client.mjs` 하나로 같이 쓴다 (ADR 0055).
 5. 대화에는 짧은 결론과 핵심 설명을 먼저 그리고 세부 내용을 접어 둔다. "원문 보기"는 `/api/evidence`로 왼쪽 서랍(세션 목록 + 작업 내용 칸 너비)을 열고, 에이전트·사용자 원문은 Markdown으로, 도구 결과는 고정폭으로 보여 준다. 앱이 만든 요청문은 서버가 준 `display`로 보여 준다. 답의 `suggest`가 있으면 해당 카드 대화로 옮기기 버튼을 둔다.
 6. 프로필/세션 전환 시 이전 응답을 새 화면에 반영하지 않는다. 같은 requestId의 재전송은 저장한 결과를 돌려주고, 새로운 의문은 새 ID로 다시 설명한다.
 

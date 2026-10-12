@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TerminalClient } from "../app/terminal-client.mjs";
 import { TerminalInput, terminalSafeText } from "../app/terminal-input.mjs";
 import { PassThrough, Writable } from "node:stream";
 import { agoLabel, runTerminal } from "../app/terminal-ui.mjs";
@@ -67,19 +66,6 @@ async function choose(ui, shortcut, label) {
 	assert.fail(`선택 목록에서 ${label} 항목을 찾지 못했어요.\n${ui.screen}`);
 }
 
-function splitResponse(text, sizes, headers = {}) {
-	const bytes = new TextEncoder().encode(text);
-	let offset = 0, sizeIndex = 0;
-	return new Response(new ReadableStream({
-		pull(controller) {
-			if (offset >= bytes.length) { controller.close(); return; }
-			const size = sizes[sizeIndex++ % sizes.length];
-			controller.enqueue(bytes.slice(offset, offset + size));
-			offset += size;
-		},
-	}), { status: 200, headers });
-}
-
 test("terminal output strips cursor controls and bidi overrides", () => {
 	const text = terminalSafeText("한국어\u001b[2J\u001b]52;clipboard\u0007\u202e화면");
 	assert.equal(text, "한국어[2J]52;clipboard화면");
@@ -125,28 +111,6 @@ test("session card time switches unit at the hour, day and week boundaries", () 
 	assert.equal(agoLabel("not a date", now), "시각 정보 없음");
 });
 
-test("SSE and NDJSON readers handle split UTF-8 stream chunks", async () => {
-	const eventPayload = `: keepalive\r\n\r\ndata: {"kind":"question","sub":"question","text":"한국어 질문"}\r\n\r\n`;
-	const askPayload = [
-		{ type: "stage", stage: "explaining" },
-		{ type: "delta", text: "안녕하세요" },
-		{ type: "answer", answer: { headline: "완료" } },
-	].map((event) => JSON.stringify(event)).join("\n") + "\n";
-	const client = new TerminalClient("http://127.0.0.1:4747", async (url, options) => {
-		if (new URL(url).pathname === "/api/live") return splitResponse(eventPayload, [1, 2, 3], { "content-type": "text/event-stream" });
-		assert.equal(new URL(url).pathname, "/api/ask");
-		assert.equal(options.headers.accept, "application/x-ndjson");
-		return splitResponse(askPayload, [1, 2, 4], { "content-type": "application/x-ndjson" });
-	});
-	const events = [];
-	await client.events("session:one", "default", new AbortController().signal, (event) => events.push(event));
-	assert.deepEqual(events, [{ kind: "question", sub: "question", text: "한국어 질문" }]);
-	const streamed = [];
-	const outcome = await client.ask({ id: "session:one", profileId: "default", question: "질문", requestId: "one" }, new AbortController().signal, (event) => streamed.push(event));
-	assert.equal(streamed[1].text, "안녕하세요");
-	assert.equal(outcome.answer.headline, "완료");
-});
-
 test("terminal cancellation restores the question and a resent answer remains visible", async (t) => {
 	const f = await fixture(t);
 	await f.control({ slowExplanation: 1000 });
@@ -165,7 +129,22 @@ test("terminal cancellation restores the question and a resent answer remains vi
 	await ui.close();
 });
 
-test("a disconnected explanation rejoins the same request instead of submitting a duplicate", async (t) => {
+test("Enter during an explanation becomes a queued question that is sent after the answer", async (t) => {
+	const f = await fixture(t);
+	await f.control({ slowExplanation: 200 });
+	const ui = await terminal(t, f.address);
+	ui.send("첫 질문\r");
+	await until(async () => (await f.calls()).some((call) => call.pid));
+	await ui.key("이어서 물을 질문\r");
+	await until(() => ui.screen.includes("대기 질문 1"));
+	assert.equal((await f.api(`/api/jobs?id=${encodeURIComponent(f.sessionId)}`)).body.length, 1, "the queued question waits for the running explanation");
+	await f.control({});
+	await until(async () => (await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body.length === 2, 15000);
+	assert.deepEqual((await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body.map((row) => row.question), ["첫 질문", "이어서 물을 질문"]);
+	await until(() => ui.screen.includes("설명이 끝났어요") && !ui.screen.includes("대기 질문 1"));
+});
+
+test("a disconnected explanation rejoins the same request, and a question typed meanwhile waits its turn", async (t) => {
 	const f = await fixture(t);
 	await f.control({ slowExplanation: 100 });
 	const requests = [];
@@ -194,14 +173,15 @@ test("a disconnected explanation rejoins the same request instead of submitting 
 		ui.send("연결이 끊겨도 한 번만 설명해요\r");
 		await until(() => ui.screen.includes("연결이 끊겼어요"));
 		await ui.key("중복 요청을 보내면 안 돼요\r");
-		assert.equal(requests.length, 1);
-		ui.send("\u0015\u0012\u0012");
+		assert.equal(requests.length, 1, "a question typed while disconnected is not sent before the rejoined answer");
+		assert.ok(ui.screen.includes("대기 질문 1"), ui.screen);
+		ui.send("\u0012\u0012");
 		await until(() => ui.screen.includes("설명 깊이와 출력을 줄이지 않은 답변입니다."));
-		assert.equal(requests.length, 2);
 		assert.deepEqual(requests[1], requests[0]);
-		assert.equal((await f.calls()).filter((call) => call.pid).length, 1);
-		await until(async () => (await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body.length === 1);
-		assert.deepEqual((await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body.map((row) => row.question), ["연결이 끊겨도 한 번만 설명해요"]);
+		await until(async () => (await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body.length === 2, 15000);
+		assert.deepEqual((await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body.map((row) => row.question), ["연결이 끊겨도 한 번만 설명해요", "중복 요청을 보내면 안 돼요"]);
+		assert.deepEqual(requests.map((entry) => entry.question), ["연결이 끊겨도 한 번만 설명해요", "연결이 끊겨도 한 번만 설명해요", "중복 요청을 보내면 안 돼요"]);
+		assert.equal((await f.calls()).filter((call) => call.pid).length, 2, "the rejoined request is explained once");
 	} finally {
 		await ui.close();
 		proxy.closeAllConnections();

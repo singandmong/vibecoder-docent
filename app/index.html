@@ -614,7 +614,9 @@
 <script type="module">
 import { mountMarkdown, unmountMarkdown } from "/assets/docent-markdown.js";
 import { mobileView } from "/mobile.mjs";
-import { answerFocus, blockTitle, cardsPayload, conversationList, excerpt, inThread } from "/conversations.mjs";
+import { answerFocus, blockTitle, conversationList, excerpt, inThread } from "/conversations.mjs";
+import { HttpTransport } from "/transport.mjs";
+import { createSessionClient } from "/session-client.mjs";
 const $ = (s) => document.querySelector(s);
 $("#settingsBtn").onclick = () => {
   $("#settings").showModal();
@@ -637,18 +639,18 @@ const remember = (key, value) => { try { localStorage.setItem(`docent.${key}`, v
 let current = null, sessions = [], profiles = [], profileId = "default", profilesReady = false;
 let theme = THEMES.includes(saved("theme")) ? saved("theme") : "auto", view = "chat";
 let sessionRequest = 0, reviewRequest = 0, evidenceRequest = 0, sessionsRequest = 0;
-let refreshedAt = null, refreshFailed = false, stream = null, glossary = [], historyLoading = false;
+let refreshedAt = null, refreshFailed = false, glossary = [], historyLoading = false;
 const pastByThread = new Map(), preferencesPending = new Set();
 let modelCatalog = null, modelCatalogLoading = false, modelCatalogError = "", modelFormProfileId = null, modelDraft = "";
 let prefetchInfo = null, prefetchFailed = false;
-const autoJobs = new Map(), pendingQueue = [], manualJobs = [], eventCards = new Map();
-const state = { draft: "", busy: false, latest: null, focus: null, status: "" };
+const eventCards = new Map();
+const state = { draft: "", latest: null, focus: null, status: "" };
 // 작업 내용 카드마다 대화가 따로 이어진다. 스레드 키는 서버가 정한 문자열, 빈 문자열은 세션 전체 대화.
 // 문답의 소속은 서버가 붙인 thread 로만 정한다(conversations.mjs의 inThread). 카드가 목록에 없는 저장 대화는 세션 전체 대화 위에 따로 보인다.
 let threadRecords = [], chatOpen = false;
 const favoriteThreads = new Set(), cardByThread = new Map();
 const currentThread = () => state.focus?.thread ?? "";
-let activeAsk = null, pipWindow = null, pipUI = null, pipOpening = false, pipListeners = null;
+let pipWindow = null, pipUI = null, pipOpening = false, pipListeners = null;
 let evidenceOpener = null;
 let termDialog = null;
 const clearSurface = (element) => { unmountMarkdown(element); element.replaceChildren(); };
@@ -671,17 +673,23 @@ const branchChip = (s) => {
   return chip;
 };
 
-async function api(url, method = "GET", data) {
-  const res = await fetch(url, { method, ...(data === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(data) }) });
-  let result;
-  try { result = await res.json(); } catch { throw new Error(`서버 응답을 읽지 못했어요 (${res.status}).`); }
-  if (!res.ok || result?.error) {
-    const error = new Error(result?.error || `요청에 실패했어요 (${res.status}).`);
-    error.serverResponse = true;
-    throw error;
-  }
-  return result;
-}
+/** 서버와 주고받는 일은 터미널과 같은 transport 가 한다. 오류에는 서버가 준 문구가 실린다 (ADR 0055). */
+const server = new HttpTransport(location.origin);
+/**
+ * 설명 요청(진행 중인 설명, 대기 질문, 중단과 바로잡기, 다시 붙기, 미리 설명, 실시간 사건)은 session-client 가 맡는다.
+ * 웹은 입력창 하나를 쓰므로, 중단한 질문은 지금 세션·프로필의 입력창이 비어 있을 때만 돌아온다.
+ */
+const client = createSessionClient({
+  transport: server,
+  drafts: {
+    read: (place) => place.profileId === profileId && place.sessionId === (current?.id ?? null) ? state.draft : null,
+    write: (place, text) => setDraft(text),
+  },
+  cards: () => [...eventCards.values()].map((card) => ({ thread: card.thread, label: card.displayTitle ?? card.focus.label })),
+  newRequestId,
+  onChange: applyClientChange,
+});
+const busy = () => Boolean(client.active);
 
 function applyTheme() {
   for (const doc of [document, pipWindow?.document].filter(Boolean)) {
@@ -751,7 +759,7 @@ function composerKeydown(event) {
   const input = event.currentTarget;
   event.preventDefault();
   if (event.metaKey || event.ctrlKey) {
-    if (state.busy && state.draft.trim()) steerActiveAsk(); else submitDraft();
+    if (busy() && state.draft.trim()) steerActiveAsk(); else submitDraft();
     return;
   }
   const mobileInput = input === $("#q") && matchMedia("(max-width:600px)").matches;
@@ -775,17 +783,17 @@ function syncComposer() {
   setPlaceholder($("#q"), historyLoading ? PLACEHOLDERS.loading : matchMedia("(max-width:600px)").matches ? "질문 입력하기 (Enter 줄바꿈)" : PLACEHOLDERS.idle);
   const send = $("#send");
   send.disabled = $("#q").disabled;
-  send.type = state.busy ? "button" : "submit";
-  send.innerHTML = state.busy ? STOP_SVG : SEND_SVG;
-  const sendLabel = state.busy ? "설명 중단" : "묻기";
+  send.type = busy() ? "button" : "submit";
+  send.innerHTML = busy() ? STOP_SVG : SEND_SVG;
+  const sendLabel = busy() ? "설명 중단" : "묻기";
   send.setAttribute("aria-label", sendLabel); send.title = sendLabel;
-  $("#steer").hidden = !(state.busy && state.draft.trim());
+  $("#steer").hidden = !(busy() && state.draft.trim());
   $("#askStatus").textContent = state.status;
   // 카드 대화는 맨 위 AI 출력 메시지가 제목 역할을 한다. 머리줄에는 같은 문장을 다시 쓰지 않는다.
   $("#chatTitle").textContent = state.focus ? "대화" : "세션 전체 대화";
   setStar($("#threadStar"), favoriteThreads.has(currentThread()));
   syncActionChips(); renderAutoStatus(); renderQueue(); renderDraftNotice();
-  for (const doc of [document, pipWindow?.document].filter(Boolean)) doc.querySelectorAll(".event-ask").forEach((b) => b.disabled = !current || state.busy || historyLoading);
+  for (const doc of [document, pipWindow?.document].filter(Boolean)) doc.querySelectorAll(".event-ask").forEach((b) => b.disabled = !current || busy() || historyLoading);
   syncPip();
 }
 
@@ -844,12 +852,12 @@ function openTerm(term, contextText, c, opener) {
   dialog.append(heading, definition ? markdown(definition, c) : el("p", "notice", "저장된 뜻풀이가 없어요. 원하면 이 내용에서 어떤 뜻인지 새로 물어볼 수 있어요."));
   const actions = el("div", "card-actions");
   const request = button("이 맥락에서 풀이 요청", () => {
-    if (!isCurrent(c) || state.busy || historyLoading) return;
+    if (!isCurrent(c) || busy() || historyLoading) return;
     dialog.close();
     const name = term.term.length > 200 ? `${term.term.slice(0, 200)}…` : term.term;
     ask(`"${name}"이라는 용어가 이 내용에서 어떤 뜻이고 왜 필요한지 쉬운 말로 설명해줘.`, { difficulty: "EASY", displayQuestion: `용어 풀이: ${name}` });
   }, "control event-ask");
-  request.disabled = state.busy || historyLoading;
+  request.disabled = busy() || historyLoading;
   actions.append(request, button("내 용어 사전 열기", () => {
     dialog.close(); window.focus();
     showReview().then(() => $("#myGlossary")?.scrollIntoView({ block: "start" }));
@@ -960,7 +968,7 @@ async function loadModelCatalog() {
   if (modelCatalogLoading) return;
   modelCatalogLoading = true; modelCatalogError = ""; renderModelSettings();
   try {
-    const result = await api("/api/models");
+    const result = await server.json("/api/models");
     modelCatalog = result.models.slice().sort((a, b) => a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name));
   } catch (error) { modelCatalogError = error.message; }
   finally { modelCatalogLoading = false; renderModelSettings(); }
@@ -968,14 +976,14 @@ async function loadModelCatalog() {
 
 async function loadProfiles() {
   try {
-    profiles = await api("/api/profiles");
+    profiles = await server.json("/api/profiles");
     profileId = profiles.some((p) => p.id === saved("profile")) ? saved("profile") : "default";
     profilesReady = true; renderProfiles(); $("#profileNotice").textContent = "";
     // 이전 버전은 자동 설명 켜기를 기기에 저장했다. 꺼둔 기억이 있으면 프로필 설정으로 한 번 옮긴다.
     const legacyAuto = saved("auto");
     if (legacyAuto === "0" || legacyAuto === "off") {
       try {
-        const p = await api(`/api/profiles/${encodeURIComponent(profileId)}`, "PATCH", { autoExplain: false });
+        const p = await server.json(`/api/profiles/${encodeURIComponent(profileId)}`, { method: "PATCH", body: { autoExplain: false } });
         profiles = profiles.map((entry) => entry.id === p.id ? p : entry); renderProfiles();
       } catch { /* 옮기지 못해도 키는 지운다. */ }
       try { localStorage.removeItem("docent.auto"); } catch {}
@@ -988,11 +996,12 @@ async function loadProfiles() {
 }
 
 function invalidateContext() {
+  // 웹은 입력창이 하나라 세션·프로필을 바꾸면 보내지 못한 대기 질문을 버린다(이전과 같음, ADR 0055). 입력창으로 되돌리지 않는다.
+  for (const job of client.queue) client.unqueue(job);
+  // 설명 스트림과 실시간 연결을 놓는다(서버 작업은 계속). 다시 열면 같은 requestId 로 다시 붙는다.
+  client.close();
   sessionRequest++; reviewRequest++; evidenceRequest++;
-  stream?.close(); stream = null;
-  for (const job of [...manualJobs, ...autoJobs.values()]) job.abort?.abort();
-  manualJobs.length = 0; autoJobs.clear(); pendingQueue.length = 0;
-  activeAsk = null; state.busy = false; historyLoading = false;
+  historyLoading = false;
   pastByThread.clear(); glossary = []; threadRecords = []; chatOpen = false; favoriteThreads.clear(); cardByThread.clear();
   eventCards.clear(); termDialog?.close();
   logStick = true;
@@ -1019,7 +1028,7 @@ async function switchProfile(id) {
 async function loadGlossary() {
   const c = capture();
   try {
-    const entries = await api(scopedUrl("/api/glossary", c));
+    const entries = await server.json(scopedUrl("/api/glossary", c));
     if (isCurrent(c)) {
       glossary = entries;
     }
@@ -1047,7 +1056,7 @@ async function showReview() {
   $("#reviewBtn").classList.add("on"); $("#reviewBtn").setAttribute("aria-pressed", "true");
   if (!profilesReady) { body.textContent = "먼저 학습 프로필을 불러와 주세요."; return; }
   try {
-    const data = await api(scopedUrl("/api/wiki", c));
+    const data = await server.json(scopedUrl("/api/wiki", c));
     if (!isCurrent(c) || view !== "review" || request !== reviewRequest) return;
     renderReview(data, c);
   } catch (e) {
@@ -1076,7 +1085,7 @@ function renderReview(data, c) {
     const run = button("용어 정리", async () => {
       run.disabled = true; message.textContent = "용어 정리 중. 모델 호출 1회, 최대 30개.";
       try {
-        await api("/api/wiki/extract", "POST", { profileId: c.profileId });
+        await server.json("/api/wiki/extract", { method: "POST", body: { profileId: c.profileId } });
         loadGlossary();
         if (isCurrent(c) && view === "review") showReview();
       } catch (e) { if (isCurrent(c)) { message.textContent = `용어 정리 실패: ${e.message}`; run.disabled = false; } }
@@ -1180,7 +1189,7 @@ async function openEvidence(citation, c = capture(), opener = null) {
   body.append(el("p", "notice", "현재 원문을 확인하는 중이에요."), evidenceBlock("답변 당시 저장한 발췌", citation, false, c));
   $("#evidenceClose").focus();
   try {
-    const result = await api(scopedUrl("/api/evidence", c, { id: citation.sessionId, ref: citation.id }));
+    const result = await server.json(scopedUrl("/api/evidence", c, { id: citation.sessionId, ref: citation.id }));
     if (!isCurrent(c) || request !== evidenceRequest || $("#evidencePanel").hidden) return;
     clearSurface(body);
     body.append(el("p", "notice", result.available ? "현재 원문에서 확인한 근거예요." : "현재 원문을 확인할 수 없어요. 저장된 발췌는 현재 원문이 아니에요."));
@@ -1216,7 +1225,7 @@ const webTitle = (title) => (typeof title === "string" ? title.replace(NERD_TITL
 async function loadSessions() {
   const request = ++sessionsRequest;
   try {
-    const entries = await api("/api/sessions");
+    const entries = await server.json("/api/sessions");
     if (request !== sessionsRequest) return;
     sessions = entries.map((s) => ({ ...s, title: webTitle(s.title) })); renderSideTabs(); renderSessions();
     refreshedAt = new Date().toISOString(); refreshFailed = false;
@@ -1280,6 +1289,7 @@ function renderSessions() {
 async function select(s) {
   if (!profilesReady) return;
   showChat(); invalidateContext(); current = s; historyLoading = true;
+  client.open({ profileId, sessionId: s.id });
   const c = capture(); remember("session", s.id); renderSessions();
   $("#title").textContent = s.title; $("#title").title = s.title;
   $("#sub").textContent = `${s.project}, ${s.provider}${s.host ? `, ${s.host}` : ""}`;
@@ -1300,7 +1310,7 @@ async function select(s) {
   $("#liveNotice").textContent = ""; state.status = ""; setStage(); syncComposer();
   loadGlossary();
   try {
-    const [past, favs] = await Promise.all([api(scopedUrl("/api/history", c, { id: s.id })), api(scopedUrl("/api/favorites", c, { id: s.id }))]);
+    const [past, favs] = await Promise.all([server.history(s.id, c.profileId), server.favorites(s.id, c.profileId)]);
     if (!isCurrent(c)) return;
     threadRecords = past.map((r) => r.keywords && r.answer ? { ...r, answer: { ...r.answer, keywords: r.keywords } } : r);
     for (const f of favs) if (typeof f.thread === "string") favoriteThreads.add(f.thread);
@@ -1311,36 +1321,10 @@ async function select(s) {
   }
   if (!isCurrent(c)) return;
   historyLoading = false; syncComposer();
-  stream = new EventSource(`/api/live?id=${encodeURIComponent(s.id)}&profileId=${encodeURIComponent(c.profileId)}`);
-  stream.onmessage = (m) => {
-    if (!isCurrent(c)) return;
-    try { renderEvent(JSON.parse(m.data)); }
-    catch { state.status = "실시간 기록 하나를 읽지 못했어요."; syncComposer(); }
-  };
+  void client.follow();
   loadPrefetch();
-  reattachJobs(c);
-}
-
-/** 새로고침·세션 다시 열기 뒤 서버에 남은 진행 중 작업에 다시 붙는다. 같은 requestId로 내면 이어 받는다. */
-async function reattachJobs(c) {
-  try {
-    const jobs = await api(scopedUrl("/api/jobs", c, { id: c.sessionId }));
-    if (!isCurrent(c)) return;
-    for (const j of jobs) {
-      if (j.auto) {
-        if (autoJobs.has(j.requestId)) continue;
-        const job = { ...newQuestion(j.question, true, j.focus ?? null), requestId: j.requestId, card: cardByThread.get(j.thread) ?? null, displayQuestion: j.display ?? null, stage: j.stage ?? "queued", text: j.text ?? "", thread: j.thread ?? "", reattached: true };
-        autoJobs.set(j.requestId, job);
-        syncAutoCard(job);
-        runJob(job);
-      } else {
-        if (manualJobs.some((job) => job.requestId === j.requestId)) continue;
-        const job = { ...newQuestion(j.question, false, j.focus ?? null), requestId: j.requestId, displayQuestion: j.display ?? null, stage: j.stage ?? "queued", text: j.text ?? "", thread: j.thread ?? "", detached: manualJobs.length > 0, reattached: true };
-        manualJobs.push(job);
-        runJob(job);
-      }
-    }
-  } catch { /* 진행 중 작업 확인에 실패해도 세션 열기는 그대로 둔다. */ }
+  // 새로고침, 세션 다시 열기 뒤 서버에 남은 진행 중 작업에 같은 requestId 로 다시 붙는다. 확인에 실패해도 세션 열기는 그대로 둔다.
+  client.rejoin().catch(() => {});
 }
 
 const EVENT_LABEL = { question: "질문", result: "작업 결과", plan: "계획" };
@@ -1380,7 +1364,7 @@ async function toggleFavorite(focus) {
   if (!c.sessionId) return;
   on ? favoriteThreads.add(key) : favoriteThreads.delete(key); syncFavorites();
   try {
-    await api("/api/favorites", "POST", { profileId: c.profileId, id: c.sessionId, favorite: on, focus: focus ? { label: focus.label.slice(0, 200), text: excerpt(focus.text) } : null });
+    await server.json("/api/favorites", { method: "POST", body: { profileId: c.profileId, id: c.sessionId, favorite: on, focus: focus ? { label: focus.label.slice(0, 200), text: excerpt(focus.text) } : null } });
   } catch (e) {
     if (!isCurrent(c)) return;
     on ? favoriteThreads.delete(key) : favoriteThreads.add(key); syncFavorites();
@@ -1476,7 +1460,7 @@ function renderThread({ top = false } = {}) {
     }
     log.append(renderAnswer(r.answer, c));
   }
-  for (const job of manualJobs) if (job.thread === key && job.nodes) log.append(...job.nodes);
+  for (const job of client.manual) if (job.thread === key && job.view.nodes) log.append(...job.view.nodes);
   if (log.childElementCount === base) log.append(el("div", "empty", key ? "이 내용에 대해 궁금한 걸 물어보세요." : "이 세션 전체에 대해 궁금한 걸 물어보세요."));
   state.latest = rows.at(-1)?.answer ?? null;
   // 카드를 막 열었으면 원문부터 보이게 맨 위에서 시작하고, 그 외에는 가장 최근 대화를 따라간다.
@@ -1613,23 +1597,16 @@ const AUTO_STATE = {
 
 /** 서버가 미리 설명을 붙인 카드는 같은 requestId로 작업에 붙어 진행 상황과 답을 받는다. */
 function attachAuto(card, ask) {
-  const existing = autoJobs.get(ask.requestId);
-  if (existing) {
-    existing.card = card;
-    if (existing.answer) attachCardAnswer(card, existing.answer);
-    else syncAutoCard(existing);
-    return;
-  }
-  const job = { ...newQuestion(ask.question, true, card.focus), requestId: ask.requestId, card, displayQuestion: ask.display ?? null, thread: card.thread };
-  autoJobs.set(job.requestId, job);
-  syncAutoCard(job);
-  runJob(job);
+  const job = client.attachAuto({ requestId: ask.requestId, question: ask.question, display: ask.display ?? null, difficulty: ask.difficulty ?? "EASY", focus: card.focus, thread: card.thread });
+  if (job) syncAutoCard(job);
 }
 
+/** 미리 설명의 진행 상태는 그 스레드의 카드에 보인다. 카드가 아직 없으면 카드가 올 때 다시 붙는다. */
 function syncAutoCard(job) {
-  if (!job.card) return;
-  if (job.stage === "queued") eventState(job.card, "새 내용의 쉬운 설명을 기다리는 중이에요.", "queued");
-  else eventState(job.card, "새 내용의 쉬운 설명을 준비하는 중이에요.", "running");
+  const card = cardByThread.get(job.thread);
+  if (!card) return;
+  if (job.stage === "queued") eventState(card, "새 내용의 쉬운 설명을 기다리는 중이에요.", "queued");
+  else eventState(card, "새 내용의 쉬운 설명을 준비하는 중이에요.", "running");
 }
 
 /** 답 뒤에서 끝난 학습 분류(카드 제목·핵심 단어·카드 제안)를 반영한다 (ADR 0032). */
@@ -1643,7 +1620,7 @@ function applyRecordUpdate(answer) {
   if (card?.answer?.recordId === answer.recordId) attachCardAnswer(card, answer);
   // 같은 스레드에서 설명이 흐르는 중이면 다시 그리지 않는다. 다음에 스레드를 그릴 때 반영된다.
   const key = currentThread();
-  if (chatOpen && inThread(record, key) && !manualJobs.some((job) => job.thread === key && job.nodes)) renderThread();
+  if (chatOpen && inThread(record, key) && !client.manual.some((job) => job.thread === key && job.view.nodes)) renderThread();
   loadGlossary(); syncPip();
 }
 
@@ -1692,7 +1669,7 @@ async function loadPrefetch() {
   if (!profilesReady) return;
   const c = capture();
   try {
-    prefetchInfo = await api(scopedUrl("/api/prefetch", c));
+    prefetchInfo = await server.json(scopedUrl("/api/prefetch", c));
     prefetchFailed = false;
   } catch { prefetchInfo = null; prefetchFailed = true; }
   if (isCurrent(c)) renderAutoStatus();
@@ -1714,7 +1691,7 @@ async function loadTailscale() {
   const box = $("#tailscaleShare"), status = $("#tailscaleStatus");
   status.textContent = "확인 중.";
   try {
-    const info = await api("/api/host");
+    const info = await server.json("/api/host");
     box.checked = info.tailscale;
     box.disabled = false;
     status.textContent = info.tailscale && info.url ? `켜짐. 다른 기기용 주소: ${info.url}` : "꺼짐";
@@ -1728,7 +1705,7 @@ $("#tailscaleShare").onchange = async () => {
   box.disabled = true;
   status.textContent = on ? "여는 중." : "닫는 중.";
   try {
-    const info = await api("/api/host", "POST", { tailscale: on });
+    const info = await server.json("/api/host", { method: "POST", body: { tailscale: on } });
     box.checked = info.tailscale;
     status.textContent = info.tailscale && info.url ? `켜짐. 다른 기기용 주소: ${info.url}` : "꺼짐";
   } catch (e) {
@@ -1813,9 +1790,9 @@ function renderAnswer(r, c = capture(), compact = false) {
   return a;
 }
 
-function newQuestion(question, auto = false, focus = null) {
-  const requestId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Array.from(crypto.getRandomValues(new Uint32Array(4)), (word) => word.toString(16).padStart(8, "0")).join("");
-  return { context: capture(), question, focus, auto, difficulty: auto ? "EASY" : "", requestId, thread: focus?.thread ?? "" };
+/** 요청 번호. HTTP(안전하지 않은 연결)에서는 crypto.randomUUID 가 없어 무작위 값으로 만든다. */
+function newRequestId() {
+  return typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Array.from(crypto.getRandomValues(new Uint32Array(4)), (word) => word.toString(16).padStart(8, "0")).join("");
 }
 
 const STAGE_TEXT = {
@@ -1825,25 +1802,13 @@ const STAGE_TEXT = {
   cancelling: "설명을 멈추는 중이에요",
 };
 
-/** 질문 대상은 명시하지 않으면 현재 선택을 따른다. 진행 중이면 대기 질문으로 쌓는다. 접수했으면 true. */
+/** 질문 대상은 명시하지 않으면 현재 선택을 따른다. 진행 중이면 session-client 가 대기 질문으로 쌓는다. 접수했으면 true. */
 function ask(question, options = {}) {
   if (!current || !profilesReady || historyLoading || !question.trim()) return false;
   const focus = Object.hasOwn(options, "focus") ? options.focus : state.focus;
-  const job = { ...newQuestion(question.trim(), false, focus), ...options, focus, auto: false, thread: focus?.thread ?? "" };
-  if (state.busy) pendingQueue.push(job);
-  else startManual(job);
+  const job = client.ask({ question: question.trim(), focus, thread: focus?.thread ?? "", display: options.displayQuestion ?? null, difficulty: options.difficulty || null });
   syncComposer();
-  return true;
-}
-
-/** 진행 중인 수동 설명이 끝나면 쌓인 대기 질문을 순서대로 시작한다. */
-function startNextQueued() {
-  renderQueue();
-  if (state.busy || !pendingQueue.length) return;
-  const job = pendingQueue.shift();
-  if (!isCurrent(job.context)) { startNextQueued(); return; }
-  manualJobs.push(job);
-  runJob(job);
+  return Boolean(job);
 }
 
 /** 대기 질문 목록: 고치기는 입력창으로 되돌리고, 지우기는 버린다. */
@@ -1851,20 +1816,11 @@ function renderQueue() {
   const draw = (box) => {
     if (!box) return;
     box.replaceChildren();
-    for (const job of pendingQueue) {
+    for (const job of client.queue) {
       const item = el("div", "queue-item");
-      item.append(el("span", "queue-text", toDisplay(job.displayQuestion || job.question)));
-      item.append(button("고치기", () => {
-        const i = pendingQueue.indexOf(job);
-        if (i < 0) return;
-        pendingQueue.splice(i, 1);
-        setDraft(job.question, true);
-      }));
-      item.append(button("지우기", () => {
-        const i = pendingQueue.indexOf(job);
-        if (i >= 0) pendingQueue.splice(i, 1);
-        renderQueue();
-      }));
+      item.append(el("span", "queue-text", toDisplay(job.display || job.question)));
+      item.append(button("고치기", () => { if (client.unqueue(job)) setDraft(job.question, true); }));
+      item.append(button("지우기", () => client.unqueue(job)));
       box.append(item);
     }
   };
@@ -1888,39 +1844,28 @@ function renderDraftNotice() {
   draw(pipWindow?.document.getElementById("pipDraftNotice"));
 }
 
-/** Esc·중단 버튼: 진행 중인 수동 설명을 서버에서 멈춘다. 스트림의 cancelled가 마무리한다. */
+/** Esc·중단 버튼: 진행 중인 설명을 서버에서 멈춘다. 멈췄으면 session-client 가 끝내고 빈 입력창에 질문을 돌려준다. */
 async function cancelActiveAsk() {
-  const job = activeAsk;
+  const job = client.active;
   if (!job || job.cancelling) return;
-  job.cancelling = true;
-  job.stage = "cancelling"; scheduleBubble(job);
-  try {
-    const result = await api("/api/ask/cancel", "POST", { profileId: job.context.profileId, requestId: job.requestId });
-    if (result?.cancelled) finishJob(job, { type: "cancelled" });
-  } catch (e) {
-    if (isCurrent(job.context)) { job.stage = "explaining"; scheduleBubble(job); state.status = `중단하지 못했어요: ${e.message}`; syncComposer(); }
-  } finally { job.cancelling = false; }
+  let result;
+  try { result = await client.stop(); }
+  catch (e) { state.status = `중단하지 못했어요: ${e.message}`; syncComposer(); return; }
+  if (!result || result.cancelled) return;
+  // 서버에 이 설명이 없다(이미 끝났거나 서버가 다시 시작됨). 연결이 끊긴 설명은 더 기다리지 않고 다음 대기 질문으로 넘어간다.
+  if (job.disconnected && client.abandon(job)) {
+    clearJobView(job);
+    state.status = "서버에서 진행 중인 설명을 찾지 못해 기다리지 않아요. 세션을 다시 열면 저장된 답을 볼 수 있어요.";
+  } else state.status = "서버에서 진행 중인 설명을 찾지 못했어요. 곧 결과가 오면 여기에 보여요.";
+  syncComposer();
 }
 
 /** ⌘Enter·지금 바로잡기: 진행 중인 설명에 보정 문장을 보낸다. */
 async function steerActiveAsk() {
-  const job = activeAsk, message = toMarkdown(state.draft).trim().slice(0, 2000);
-  if (!job || !message || job.steering) return;
-  job.steering = true;
-  try {
-    await api("/api/ask/steer", "POST", { profileId: job.context.profileId, requestId: job.requestId, message });
-    addSteerLine(job, message);
-    setDraft("");
-  } catch (e) {
-    if (isCurrent(job.context)) { state.status = `바로잡기를 보내지 못했어요: ${e.message}`; syncComposer(); }
-  } finally { job.steering = false; }
-}
-
-function addSteerLine(job, message) {
-  if (!message || job.steerLines.has(message)) return;
-  job.steerLines.add(message);
-  job.steerBox?.append(el("div", "steer-line", `바로잡기: ${message}`));
-  syncPip();
+  const message = toMarkdown(state.draft).trim().slice(0, 2000);
+  if (!client.active || !message) return;
+  try { if (await client.steer(message)) setDraft(""); }
+  catch (e) { state.status = `바로잡기를 보내지 못했어요: ${e.message}`; syncComposer(); }
 }
 
 const typingDots = () => {
@@ -1937,167 +1882,141 @@ function fillBubble(job, bubble) {
   bubble.hidden = false;
   bubble.classList.toggle("typing", !job.text);
   bubble.setAttribute("role", "status");
-  if (job.text) bubble.append(markdown(job.text, job.context), typingDots());
-  else bubble.append(typingDots(), el("span", "typing-text", STAGE_TEXT[job.stage] ?? "설명을 준비하는 중이에요"));
+  if (job.text) bubble.append(markdown(job.text, capture()), typingDots());
+  else bubble.append(typingDots(), el("span", "typing-text", STAGE_TEXT[job.cancelling ? "cancelling" : job.stage] ?? "설명을 준비하는 중이에요"));
 }
 
 function scheduleBubble(job) {
-  if (job.renderTimer) return;
-  const delay = Math.max(0, 100 - (Date.now() - (job.lastRender ?? 0)));
-  job.renderTimer = setTimeout(() => {
-    job.renderTimer = null; job.lastRender = Date.now();
-    fillBubble(job, job.bubble);
-    if (job.pipBubble?.isConnected) fillBubble(job, job.pipBubble);
+  const parts = job.view;
+  if (parts.renderTimer) return;
+  const delay = Math.max(0, 100 - (Date.now() - (parts.lastRender ?? 0)));
+  parts.renderTimer = setTimeout(() => {
+    parts.renderTimer = null; parts.lastRender = Date.now();
+    fillBubble(job, parts.bubble);
+    if (parts.pipBubble?.isConnected) fillBubble(job, parts.pipBubble);
   }, delay);
 }
 
-function resetJob(job) {
-  job.nodes?.forEach((node) => node.remove());
-  job.nodes = null; job.bubble = null; job.pipBubble = null; job.steerBox = null;
-  job.text = ""; job.stage = null; job.steerLines = new Set();
-  job.done = false; job.cancelling = false; job.steering = false; job.abort = null;
+/** 작업의 화면 조각(질문, 바로잡기 줄, 말풍선)을 지운다. 같은 요청에 다시 붙으면 새로 만든다. */
+function clearJobView(job) {
+  const parts = job.view;
+  if (parts.renderTimer) { clearTimeout(parts.renderTimer); parts.renderTimer = null; }
+  parts.nodes?.forEach((node) => node.remove());
+  parts.failure?.remove();
+  parts.nodes = null; parts.bubble = null; parts.pipBubble = null; parts.steerBox = null; parts.failure = null; parts.failureText = ""; parts.steersShown = 0;
 }
 
-function startManual(job) {
-  manualJobs.push(job);
-  runJob(job);
-}
-
-async function runJob(job) {
-  if (!isCurrent(job.context) || job.abort?.signal.aborted) return;
-  job.abort = new AbortController();
-  job.stage ??= null; job.text ??= ""; job.steerLines ??= new Set();
-  if (!job.auto && !job.detached) {
-    activeAsk = job; state.busy = true;
-    state.status = "";
+/** session-client 의 변화를 화면에 옮긴다 (ADR 0055). 실시간 연결은 EventSource 처럼 알림 없이 다시 붙는다. */
+function applyClientChange(change) {
+  if (change.type === "live") {
+    try { renderEvent(change.event); }
+    catch { state.status = "실시간 기록 하나를 읽지 못했어요."; syncComposer(); }
+    return;
   }
-  const visible = () => chatOpen && currentThread() === job.thread;
+  if (change.type === "live-status") return;
+  if (change.type === "queue") { syncComposer(); return; }
+  if (change.type === "end") { finishJob(change.job, change.outcome); return; }
+  showJob(change.job, change);
+}
+
+/** 미리 설명은 카드 상태로, 사용자 질문은 대화의 말풍선으로 보여 준다. */
+function showJob(job, change) {
+  if (job.auto) { syncAutoCard(job); return; }
+  const parts = job.view;
+  if (!parts.nodes && !job.disconnected) {
+    parts.failure?.remove(); parts.failure = null;
+    const question = questionNode(job.display || job.question, cardByThread.get(job.thread)?.source ? null : job.focus);
+    const steerBox = el("div", "steer-lines"), bubble = el("div", "a pending-answer");
+    parts.steerBox = steerBox; parts.bubble = bubble; parts.nodes = [question, steerBox, bubble]; parts.steersShown = 0;
+    fillBubble(job, bubble);
+    if (chatOpen && currentThread() === job.thread) toLog(parts.nodes, true);
+    if (!job.detached) state.status = "";
+  }
+  for (const message of job.steers.slice(parts.steersShown ?? 0)) parts.steerBox?.append(el("div", "steer-line", `바로잡기: ${message}`));
+  parts.steersShown = job.steers.length;
+  // 연결이 끊기면 실패 상자로 바꾼다. 설명은 서버에서 계속될 수 있어 진행 중인 설명으로 남는다 (중단 버튼, 대기 질문 유지).
+  if (change.error) showFailure(job, change.error, 0);
+  else if (!job.disconnected) scheduleBubble(job);
+  if (!change.event) syncComposer();
+  else if (change.event.type === "steer") syncPip();
+}
+
+/** 실패 상자. 같은 요청 번호로 결과를 다시 확인하거나 새 설명을 요청할 수 있다. 연결이 끊긴 설명은 서버에서 계속될 수 있다. */
+function showFailure(job, error, status) {
+  const parts = job.view;
+  if (parts.renderTimer) { clearTimeout(parts.renderTimer); parts.renderTimer = null; }
+  const message = `답하지 못했어요: ${error || "알 수 없는 오류"}`;
+  const card = job.auto ? cardByThread.get(job.thread) : null;
   if (job.auto) {
-    job.card?.querySelector(".event-error")?.remove();
-    syncAutoCard(job);
-  } else {
-    if (!job.nodes) {
-      const question = questionNode(job.displayQuestion || job.question, cardByThread.get(job.thread)?.source ? null : job.focus);
-      const steerBox = el("div", "steer-lines"), bubble = el("div", "a pending-answer");
-      job.steerBox = steerBox; job.bubble = bubble; job.nodes = [question, steerBox, bubble];
-      fillBubble(job, bubble);
+    if (card) eventState(card, "쉬운 설명을 준비하지 못했어요. 원문을 설명으로 대신하지 않아요. 아래에서 다시 요청할 수 있어요.", "failed");
+  } else if (!job.detached && !parts.bubble?.isConnected) state.status = message;
+  const box = el("div", "a err event-error", message);
+  const blocked = () => !job.auto && client.active && client.active !== job;
+  const retry = button("같은 요청 결과 다시 확인", () => {
+    if (blocked()) return;
+    clearJobView(job);
+    client.resume(job);
+  });
+  const newAsk = button("새 설명 요청", () => {
+    if (blocked()) return;
+    clearJobView(job);
+    if (job.auto) client.attachAuto({ requestId: newRequestId(), question: job.question, display: job.display, difficulty: job.difficulty, focus: job.focus, thread: job.thread });
+    else {
+      if (client.active === job) client.abandon(job);
+      client.ask({ question: job.question, focus: job.focus, thread: job.thread, display: job.display, difficulty: job.difficulty });
     }
-    if (visible() && !job.bubble.isConnected) toLog(job.nodes, true);
-  }
-  syncComposer();
-  const focus = job.focus ? { label: String(job.focus.label ?? "").slice(0, 200), text: excerpt(job.focus.text) } : null;
-  const body = { id: job.context.sessionId, profileId: job.context.profileId, question: job.question, requestId: job.requestId };
-  if (job.auto) body.auto = true;
-  if (focus) body.focus = focus;
-  if (job.difficulty) body.difficulty = job.difficulty;
-  if (!job.auto && !job.detached && !job.reattached) body.cards = cardsPayload([...eventCards.values()].map((card) => ({ thread: card.thread, label: card.displayTitle ?? card.focus.label })));
-  let outcome = null;
-  try {
-    const res = await fetch("/api/ask", { method: "POST", headers: { "content-type": "application/json", accept: "application/x-ndjson" }, body: JSON.stringify(body), signal: job.abort.signal });
-    if (!res.ok) {
-      let error = `요청에 실패했어요 (${res.status}).`, cancelled = false;
-      outcome = cancelled ? { type: "cancelled" } : { type: "error", error, status: res.status };
-    } else {
-      const reader = res.body.getReader(), decoder = new TextDecoder();
-      let buffer = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop();
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          let msg;
-          try { msg = JSON.parse(line); } catch { continue; }
-          if (!isCurrent(job.context)) return;
-          if (msg.type === "queued") { job.stage = "queued"; scheduleBubble(job); }
-          else if (msg.type === "stage") { job.stage = msg.stage; scheduleBubble(job); }
-          else if (msg.type === "delta") { job.text += msg.text ?? ""; scheduleBubble(job); }
-          else if (msg.type === "steer") { addSteerLine(job, msg.message ?? ""); }
-          else if (msg.type === "reset") { job.text = ""; scheduleBubble(job); }
-          else if (["answer", "cancelled", "error"].includes(msg.type)) outcome = msg;
-          if (job.auto) syncAutoCard(job);
-        }
-      }
-      if (!outcome) outcome = { type: "error", error: "설명이 끝나기 전에 연결이 닫혔어요." };
-    }
-  } catch (e) {
-    if (e?.name === "AbortError" || !isCurrent(job.context)) return;
-    outcome = { type: "error", error: e.message };
-  }
-  if (!isCurrent(job.context)) return;
-  finishJob(job, outcome);
+    syncComposer();
+  });
+  box.append(el("p", "notice", status
+    ? "서버가 실패를 알려왔어요. 같은 요청 번호는 저장된 답변이나 실패 결과를 다시 확인해요. 모델에 다시 물으려면 새 설명을 요청해 주세요."
+    : "결과를 받지 못했지만 이전 요청은 진행 중일 수 있어요. 같은 요청 번호로 결과를 확인하면 학습 기록이 중복되지 않아요."), retry, newAsk);
+  const bubble = parts.bubble;
+  parts.failure?.remove();
+  parts.failure = box; parts.failureText = message; parts.bubble = null;
+  if (job.auto) { card?.append(box); parts.nodes = null; return; }
+  const [question, steerBox] = parts.nodes ?? [questionNode(job.display || job.question, cardByThread.get(job.thread)?.source ? null : job.focus), el("div", "steer-lines")];
+  if (bubble?.isConnected) bubble.replaceWith(box);
+  else parts.nodes?.forEach((node) => node.remove());
+  // 연결이 끊긴 설명은 진행 중으로 남는다. 실패 상자가 유일한 출구이므로 스레드를 다시 그리거나 다른 스레드에서 돌아와도 다시 붙인다.
+  parts.nodes = [question, steerBox, box];
 }
 
 function finishJob(job, outcome) {
-  if (job.done) return;
-  job.done = true; job.abort?.abort();
-  if (job.renderTimer) { clearTimeout(job.renderTimer); job.renderTimer = null; }
+  const parts = job.view, c = capture();
+  if (parts.renderTimer) { clearTimeout(parts.renderTimer); parts.renderTimer = null; }
   if (outcome.type === "answer") {
     const r = outcome.answer;
     if (job.auto) {
-      job.answer = r;
-      if (job.card) attachCardAnswer(job.card, r);
+      const card = cardByThread.get(job.thread);
+      if (card) attachCardAnswer(card, r);
     } else {
-      job.nodes = null;
-      if (job.bubble?.isConnected) job.bubble.replaceWith(renderAnswer(r, job.context));
+      const bubble = parts.bubble;
+      parts.nodes = null;
+      if (bubble?.isConnected) bubble.replaceWith(renderAnswer(r, c));
     }
-    const record = { question: job.question, display: job.displayQuestion || undefined, focus: job.focus ? { label: String(job.focus.label ?? "").slice(0, 200), text: excerpt(job.focus.text) } : null, answer: r, auto: job.auto, thread: r.thread ?? job.thread, steers: job.steerLines?.size ? [...job.steerLines] : undefined, ts: new Date().toISOString() };
+    const record = { question: job.question, display: job.display || undefined, focus: job.focus ? { label: String(job.focus.label ?? "").slice(0, 200), text: excerpt(job.focus.text) } : null, answer: r, auto: job.auto, thread: r.thread ?? job.thread, steers: job.steers.length ? [...job.steers] : undefined, ts: new Date().toISOString() };
     threadRecords.push(record);
     if (record.thread) pastByThread.set(record.thread, r);
     if (chatOpen && inThread(record, currentThread())) {
-      if (job.auto) toLog([questionNode(job.displayQuestion || displayOf(job.question)), renderAnswer(r, job.context)]);
+      if (job.auto) toLog([questionNode(job.display || displayOf(job.question)), renderAnswer(r, c)]);
       else if (currentThread() !== job.thread) renderThread();
       state.latest = r;
     }
-    if (job === activeAsk) state.status = "";
+    if (!job.auto && !job.detached) state.status = "";
     loadGlossary(); loadPrefetch();
     if (view === "review") showReview();
   } else if (outcome.type === "cancelled") {
-    job.nodes?.forEach((node) => node.remove()); job.nodes = null;
+    parts.nodes?.forEach((node) => node.remove()); parts.nodes = null;
+    parts.failure?.remove(); parts.failure = null;
     if (job.auto) {
-      if (job.card) eventState(job.card, "", "ready");
+      const card = cardByThread.get(job.thread);
+      if (card) eventState(card, "", "ready");
     } else if (!job.detached) {
-      if (!state.draft) setDraft(job.question);
-      else { draftNotice = { text: "보낸 질문을 중단했어요.", question: job.question }; renderDraftNotice(); }
-      if (job === activeAsk) state.status = "";
+      if (!outcome.restored) { draftNotice = { text: "보낸 질문을 중단했어요.", question: job.question }; renderDraftNotice(); }
+      state.status = "";
     }
-  } else {
-    const message = `답하지 못했어요: ${outcome.error || "알 수 없는 오류"}`;
-    if (job.auto) {
-      if (job.card) eventState(job.card, "쉬운 설명을 준비하지 못했어요. 원문을 설명으로 대신하지 않아요. 아래에서 다시 요청할 수 있어요.", "failed");
-    } else if (job === activeAsk && !job.bubble?.isConnected) state.status = message;
-    const error = el("div", "a err event-error", message);
-    const retry = button("같은 요청 결과 다시 확인", () => {
-      if (!isCurrent(job.context) || (!job.auto && state.busy)) return;
-      error.remove(); resetJob(job);
-      if (job.auto) { autoJobs.set(job.requestId, job); runJob(job); }
-      else startManual(job);
-    });
-    const newAsk = button("새 설명 요청", () => {
-      if (!isCurrent(job.context) || (!job.auto && state.busy)) return;
-      error.remove();
-      const fresh = { ...newQuestion(job.question, job.auto, job.focus), difficulty: job.difficulty, card: job.card, displayQuestion: job.displayQuestion, thread: job.thread };
-      if (job.auto) { autoJobs.set(fresh.requestId, fresh); runJob(fresh); }
-      else startManual(fresh);
-    });
-    error.append(el("p", "notice", outcome.status
-      ? "서버가 실패를 알려왔어요. 같은 요청 번호는 저장된 답변이나 실패 결과를 다시 확인해요. 모델에 다시 물으려면 새 설명을 요청해 주세요."
-      : "결과를 받지 못했지만 이전 요청은 진행 중일 수 있어요. 같은 요청 번호로 결과를 확인하면 학습 기록이 중복되지 않아요."), retry, newAsk);
-    if (job.auto) job.card?.append(error);
-    else if (job.bubble?.isConnected) job.bubble.replaceWith(error);
-    else job.nodes?.forEach((node) => node.remove());
-    job.nodes = null;
-  }
-  if (job.auto) autoJobs.delete(job.requestId);
-  else {
-    const i = manualJobs.indexOf(job);
-    if (i >= 0) manualJobs.splice(i, 1);
-    if (activeAsk === job) { activeAsk = null; state.busy = false; }
-  }
+  } else showFailure(job, outcome.error, outcome.status);
   syncComposer();
-  startNextQueued();
 }
 
 function pipCapability() {
@@ -2182,11 +2101,11 @@ async function togglePip() {
     ui.input.addEventListener("input", composerInput, options);
     ui.input.addEventListener("keydown", composerKeydown, options);
     ui.steer.addEventListener("click", () => steerActiveAsk(), options);
-    ui.send.addEventListener("click", () => { if (state.busy) cancelActiveAsk(); }, options);
+    ui.send.addEventListener("click", () => { if (busy()) cancelActiveAsk(); }, options);
     ui.form.addEventListener("submit", (event) => { event.preventDefault(); submitDraft(); }, options);
     doc.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || doc.querySelector("dialog[open]")) return;
-      if (state.busy) { event.preventDefault(); cancelActiveAsk(); }
+      if (busy()) { event.preventDefault(); cancelActiveAsk(); }
     }, options);
     win.addEventListener("pagehide", () => releasePip(win), { once: true, signal: pipListeners.signal });
     pipUI = ui;
@@ -2212,11 +2131,11 @@ function syncPip() {
   setPlaceholder(ui.input, PLACEHOLDERS.idle);
   ui.input.disabled = !current || !profilesReady || historyLoading || !chatOpen;
   ui.send.disabled = ui.input.disabled;
-  ui.send.type = state.busy ? "button" : "submit";
-  ui.send.innerHTML = state.busy ? STOP_SVG : SEND_SVG;
-  const sendLabel = state.busy ? "설명 중단" : "묻기";
+  ui.send.type = busy() ? "button" : "submit";
+  ui.send.innerHTML = busy() ? STOP_SVG : SEND_SVG;
+  const sendLabel = busy() ? "설명 중단" : "묻기";
   ui.send.setAttribute("aria-label", sendLabel); ui.send.title = sendLabel;
-  ui.steer.hidden = !(state.busy && state.draft.trim());
+  ui.steer.hidden = !(busy() && state.draft.trim());
   ui.chatTitle.textContent = chatOpen && !state.focus ? "세션 전체 대화" : "대화";
   ui.chatClose.hidden = !chatOpen;
   // 작업 내용(미니): 최신이 위. 카드 제목·즐겨찾기·선택이 바뀌면 다시 그린다.
@@ -2236,11 +2155,11 @@ function syncPip() {
   }
   // 대화(미니): 현재 스레드의 문답과 진행 중인 수동 요청.
   const rows = chatOpen ? threadRecords.filter((record) => inThread(record, key)) : [];
-  const pending = chatOpen ? manualJobs.filter((job) => job.thread === key && job.nodes) : [];
-  const threadKey = `${scope}\u0001${chatOpen ? 1 : 0}\u0001${key}\u0001${rows.length}\u0001${pending.map((job) => `${job.requestId}:${job.steerLines?.size ?? 0}`).join(",")}`;
+  const pending = chatOpen ? client.manual.filter((job) => job.thread === key && job.view.nodes) : [];
+  const threadKey = `${scope}\u0001${chatOpen ? 1 : 0}\u0001${key}\u0001${rows.length}\u0001${pending.map((job) => `${job.requestId}:${job.steers.length}:${job.view.failure ? 1 : 0}`).join(",")}`;
   if (threadKey === ui.threadKey) return;
   ui.threadKey = threadKey; clearSurface(ui.log);
-  for (const job of pending) job.pipBubble = null;
+  for (const job of pending) job.view.pipBubble = null;
   if (!chatOpen) {
     const intro = el("div", "chat-intro");
     intro.append(el("p", null, current ? "작업 내용에서 카드를 누르면 그 내용의 대화가 열려요." : "본문에서 세션을 골라 주세요."));
@@ -2261,11 +2180,13 @@ function syncPip() {
     ui.log.append(renderAnswer(r.answer, c, true));
   }
   for (const job of pending) {
-    const question = questionNode(job.displayQuestion || job.question, key ? null : job.focus);
+    const question = questionNode(job.display || job.question, key ? null : job.focus);
     const lines = el("div", "steer-lines");
-    for (const message of job.steerLines ?? []) lines.append(el("div", "steer-line", `바로잡기: ${message}`));
+    for (const message of job.steers) lines.append(el("div", "steer-line", `바로잡기: ${message}`));
+    // 끊긴 설명은 작은 창에서도 실패 문구로 보인다. 다시 확인하기는 본문 대화의 실패 상자에서 한다.
+    if (job.view.failure) { ui.log.append(question, lines, el("div", "a err", job.view.failureText)); continue; }
     const bubble = el("div", "a pending-answer");
-    job.pipBubble = bubble; fillBubble(job, bubble);
+    job.view.pipBubble = bubble; fillBubble(job, bubble);
     ui.log.append(question, lines, bubble);
   }
   if (ui.log.childElementCount === base) ui.log.append(el("div", "empty", key ? "이 내용에 대해 궁금한 걸 물어보세요." : "이 세션 전체에 대해 궁금한 걸 물어보세요."));
@@ -2390,7 +2311,7 @@ $("#profileCreate").onsubmit = async (e) => {
   if (!profilesReady || !name || $("#profileCreateSubmit").disabled) return;
   $("#profileCreateSubmit").disabled = true; $("#profileNotice").textContent = "프로필을 만드는 중이에요.";
   try {
-    const p = await api("/api/profiles", "POST", { name });
+    const p = await server.json("/api/profiles", { method: "POST", body: { name } });
     profiles.push(p); renderProfiles();
     if (isCurrent(c)) {
       $("#profileName").value = ""; $("#profileCreate").hidden = true; $("#profileNew").setAttribute("aria-expanded", "false");
@@ -2409,7 +2330,7 @@ $("#modelForm").onsubmit = async (e) => {
   preferencesPending.add(c.profileId);
   $("#preferencesSave").disabled = true; renderModelSelection(); $("#modelNotice").textContent = "저장 중.";
   try {
-    const p = await api(`/api/profiles/${encodeURIComponent(c.profileId)}`, "PATCH", { model });
+    const p = await server.json(`/api/profiles/${encodeURIComponent(c.profileId)}`, { method: "PATCH", body: { model } });
     profiles = profiles.map((entry) => entry.id === p.id ? p : entry);
     if (profileId === p.id) { modelDraft = p.model ?? ""; renderModelSettings(); }
     if (isCurrent(c)) $("#modelNotice").textContent = "저장됨. 다음 설명 요청부터 적용.";
@@ -2429,7 +2350,7 @@ $("#preferencesForm").onsubmit = async (e) => {
   $("#preferencesSave").disabled = true; $("#preferencesNotice").textContent = "저장 중.";
   renderModelSelection();
   try {
-    const p = await api(`/api/profiles/${encodeURIComponent(c.profileId)}`, "PATCH", { defaultDifficulty: $("#defaultDifficulty").value, domainDifficulties });
+    const p = await server.json(`/api/profiles/${encodeURIComponent(c.profileId)}`, { method: "PATCH", body: { defaultDifficulty: $("#defaultDifficulty").value, domainDifficulties } });
     profiles = profiles.map((entry) => entry.id === p.id ? p : entry);
     if (profileId === p.id) { renderProfiles(); syncPip(); }
     if (isCurrent(c)) $("#preferencesNotice").textContent = "저장됨. 다음 질문부터 적용.";
@@ -2450,14 +2371,14 @@ $("#auto").onchange = async () => {
   const c = capture(), on = $("#auto").checked;
   $("#autoStatus").textContent = "저장 중.";
   try {
-    const p = await api(`/api/profiles/${encodeURIComponent(c.profileId)}`, "PATCH", { autoExplain: on });
+    const p = await server.json(`/api/profiles/${encodeURIComponent(c.profileId)}`, { method: "PATCH", body: { autoExplain: on } });
     profiles = profiles.map((entry) => entry.id === p.id ? p : entry);
     if (isCurrent(c)) $("#autoStatus").textContent = "저장됨. 새 사건부터 적용.";
   } catch (e) {
     if (isCurrent(c)) $("#autoStatus").textContent = `자동 설명 설정을 저장하지 못했어요: ${e.message}`;
   } finally { if (profileId === c.profileId) { renderProfiles(); loadPrefetch(); } }
 };
-$("#send").onclick = () => { if (state.busy) cancelActiveAsk(); };
+$("#send").onclick = () => { if (busy()) cancelActiveAsk(); };
 $("#steer").onclick = () => steerActiveAsk();
 $("#pipBtn").onclick = togglePip;
 $("#evidenceClose").onclick = () => closeEvidence();
@@ -2466,9 +2387,9 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!$("#evidencePanel").hidden) { closeEvidence(); return; }
   if (document.querySelector("dialog[open]")) return;
-  if (state.busy) { e.preventDefault(); cancelActiveAsk(); }
+  if (busy()) { e.preventDefault(); cancelActiveAsk(); }
 });
-window.addEventListener("pagehide", (event) => { stream?.close(); pipWindow?.close(); if (!event.persisted) unmountMarkdown(document); });
+window.addEventListener("pagehide", (event) => { client.close(); pipWindow?.close(); if (!event.persisted) unmountMarkdown(document); });
 window.addEventListener("pageshow", (e) => { if (e.persisted && current) select(current); });
 applyContentFont(); applyTheme(); updatePipButton(); showSettingsTab("tabLook");
 async function initialize() {

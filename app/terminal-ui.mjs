@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
-import { cardsPayload, conversationList, threadRows } from "./conversations.mjs";
-import { TerminalClient } from "./terminal-client.mjs";
+import { conversationList, threadRows } from "./conversations.mjs";
+import { createSessionClient } from "./session-client.mjs";
+import { HttpTransport } from "./transport.mjs";
 import { TerminalInput, graphemes, terminalSafeText, wrapTerminalText } from "./terminal-input.mjs";
 import { createTerminalTheme } from "./terminal-theme.mjs";
 import { createTerminalMarkdown } from "./terminal-markdown.mjs";
@@ -62,11 +62,16 @@ function moveVertical(draft, cursor, delta, preferredColumn) {
 	return { cursor: offset + Math.min(targetColumn, graphemes(lines[targetLine]).length), preferredColumn: targetColumn };
 }
 
-function requestStatus(event) {
-	if (event.type === "queued") return "다른 설명이 끝나기를 기다리는 중이에요";
-	if (event.type === "stage") return event.stage === "planning" ? "질문을 살펴보는 중이에요" : event.stage === "explaining" ? "설명을 쓰는 중이에요" : "설명을 준비하는 중이에요";
-	return "설명을 쓰는 중이에요";
+/** 설명 작업의 단계(session-client)를 진행 줄 문구로. */
+function stageText(job) {
+	if (job.stage === "queued") return "다른 설명이 끝나기를 기다리는 중이에요";
+	if (job.stage === "planning") return "질문을 살펴보는 중이에요";
+	if (job.stage === "explaining") return "설명을 쓰는 중이에요";
+	return job.stage ? "설명을 준비하는 중이에요" : "요청을 보내는 중이에요";
 }
+
+/** 서버 오류는 HTTP 상태를 붙여 보여 준다. 연결 실패에는 상태가 없다. */
+const reason = (error) => `${error?.message || String(error)}${error?.status ? ` (HTTP ${error.status})` : ""}`;
 
 /** Runs a full-screen, dependency-free TTY client. Server lifetime remains independent of this process. */
 export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = process.stdout, env = process.env, initialSession = null } = {}) {
@@ -76,13 +81,13 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	const theme = createTerminalTheme();
 	const markdown = createTerminalMarkdown(theme);
 	const symbols = statusSymbols();
-	const api = new TerminalClient(baseUrl);
+	const api = new HttpTransport(baseUrl);
 	const herdr = createHerdrReporter({ env, baseUrl });
 	let profiles, sessions;
 	try {
 		[profiles, sessions] = await Promise.all([api.profiles(), api.sessions()]);
 	} catch (error) {
-		const detail = terminalSafeText(error?.message || String(error));
+		const detail = terminalSafeText(reason(error));
 		throw new Error(`도슨트 서버에 연결하지 못했어요.\n주소: ${baseUrl}\n${detail}\n별도 터미널에서 docent --no-open 으로 서버를 시작하거나 --url 로 서버 주소를 지정하세요.`);
 	}
 	if (!Array.isArray(profiles) || !profiles.length) throw new Error("서버에서 프로필 목록을 받지 못했어요.");
@@ -97,7 +102,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		focus: null, thread: "",
 		purpose: "ask", drafts: new Map(),
 		picker: "sessions", pickerIndex: { sessions: 0, profiles: 0, conversations: 0, answers: 0 },
-		ask: null, selectedAnswer: null,
+		selectedAnswer: null, settling: null,
 		bodyScroll: 0, followSelection: true, followBottom: false,
 		notice: "", noticeError: false, noticeKind: "info", liveNotice: "",
 		completion: { key: "", index: 0, dismissed: null }, models: null, favorites: null,
@@ -106,10 +111,8 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	const FRAME_MS = 16;
 	let lastRenderAt = 0;
 	let painted = { size: "", rows: [] }; // 마지막으로 화면에 쓴 줄. 바뀐 줄만 다시 쓰는 기준
-	let streamController = null;
 	let historyGeneration = 0;
 	let sessionGeneration = 0;
-	let askController = null;
 	let resolveFinished;
 	const finished = new Promise((resolve) => { resolveFinished = resolve; });
 
@@ -151,17 +154,14 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		return threadRows(state.history, state.thread);
 	}
 
-	function sameAskContext() {
-		return Boolean(state.ask && state.ask.sessionId === state.session?.id && state.ask.profileId === selectedProfileId(state.profile));
-	}
-
 	function isAnswerSelected(row) {
 		return Boolean(state.selectedAnswer && row.ts === state.selectedAnswer.ts && (row.question ?? "") === state.selectedAnswer.question);
 	}
 
 	// --- Drafts: keyed per profile/session/thread/purpose so context switches never leak text. ---
+	const placeKey = (place, purpose) => `${place.profileId}|${place.sessionId}|${place.thread}|${purpose}`;
 	function draftKey(purpose = state.purpose) {
-		return `${selectedProfileId(state.profile)}|${state.session?.id ?? ""}|${state.thread}|${purpose}`;
+		return placeKey({ profileId: selectedProfileId(state.profile), sessionId: state.session?.id ?? "", thread: state.thread }, purpose);
 	}
 	function currentDraft() {
 		const key = draftKey();
@@ -178,6 +178,18 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	function draftLimit() {
 		return state.purpose === "steer" ? 2000 : 8000;
 	}
+
+	// --- Session client: ask jobs, 대기 질문, stop/steer, rejoin and live events (session-client.mjs, ADR 0055). ---
+	// 중단한 질문과 보내지 못한 대기 질문은 그 질문의 스레드 입력창이 비어 있을 때만 돌아간다.
+	const client = createSessionClient({
+		transport: api,
+		drafts: {
+			read: (place) => state.drafts.get(placeKey(place, "ask"))?.text ?? "",
+			write: (place, text) => state.drafts.set(placeKey(place, "ask"), { text, cursor: graphemes(text).length, preferredColumn: null }),
+		},
+		cards: () => state.cards.map((card) => ({ thread: card.thread, label: card.displayTitle || card.focus.label })),
+		onChange: (change) => { if (state.running) applyChange(change); },
+	});
 
 	// --- Conversation choices: session whole + live cards + saved-only threads (conversations.mjs). ---
 	function conversationOptions() {
@@ -303,12 +315,20 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		else add(items, " 아직 저장된 답변이 없어요.", { role: "muted" });
 	}
 
-	function addAskBlock(items) {
-		const ask = state.ask;
+	function addAskBlock(items, ask) {
 		divider(items);
-		addUserMessage(items, ask.question, ask.steers);
+		addUserMessage(items, ask.display || ask.question, ask.steers);
 		divider(items);
 		if (ask.text) addMarkdown(items, ask.text);
+	}
+
+	/** 대기 질문: 지금 설명이 끝나면 순서대로 보낸다. /대기 로 마지막 질문을 입력창에 되돌린다. */
+	function addQueue(items) {
+		const queue = client.queue;
+		if (!queue.length) return;
+		divider(items);
+		queue.forEach((job, index) => items.push({ text: theme.span("muted", ` 대기 질문 ${index + 1}  ${clipLine(job.question, width() - 14)}`), role: "text", rich: true }));
+		items.push({ text: theme.span("dim", " 지금 설명이 끝나면 차례대로 보내요. /대기 로 마지막 질문을 입력창에 돌려놔요."), role: "text", rich: true });
 	}
 
 	function conversationBody() {
@@ -322,12 +342,14 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			items.push({ text: "", role: "custom" });
 			divider(items);
 		}
-		if (!rows.length && !sameAskContext()) {
+		const asks = [state.settling, client.active].filter(Boolean);
+		if (!rows.length && !asks.length) {
 			add(items, " 이 작업에서 무엇이 궁금한가요?", { role: "title" });
 			add(items, " 아래에 질문을 쓰세요. # 를 입력하면 설명할 대화를, / 를 입력하면 모든 명령을 고를 수 있어요.", { role: "muted" });
 		}
 		for (const row of rows) addRecord(items, row, isAnswerSelected(row));
-		if (sameAskContext()) addAskBlock(items);
+		for (const ask of asks) addAskBlock(items, ask);
+		addQueue(items);
 		return items;
 	}
 
@@ -366,17 +388,18 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 	let spinnerFrame = 0, spinnerTimer = null;
 	function syncSpinner() {
-		const active = Boolean(state.ask && !state.ask.disconnected && !state.ask.cancelling);
+		const ask = client.active;
+		const active = Boolean(ask && !ask.disconnected && !ask.cancelling);
 		if (active && !spinnerTimer) spinnerTimer = setInterval(() => { spinnerFrame = (spinnerFrame + 1) % SPINNER.length; scheduleRender(); }, 100);
 		else if (!active && spinnerTimer) { clearInterval(spinnerTimer); spinnerTimer = null; }
 	}
 
 	/** Pi shows working state and messages just above the editor; nothing is shown when idle. */
 	function activityLine() {
-		const ask = state.ask;
+		const ask = client.active;
 		if (ask?.disconnected) return theme.span("warning", " 연결이 끊겼어요. Ctrl+R로 같은 요청에 다시 연결해요.");
 		if (ask?.cancelling) return theme.span("warning", " 설명을 멈추는 중이에요");
-		if (ask) return `${theme.span("title", ` ${SPINNER[spinnerFrame]} `)}${theme.span("muted", `${ask.stage || "설명을 준비하는 중이에요"}`)}${theme.span("dim", " (/중단 stop, /바로잡기 steer)")}`;
+		if (ask) return `${theme.span("title", ` ${SPINNER[spinnerFrame]} `)}${theme.span("muted", stageText(ask))}${theme.span("dim", " (/중단 stop, /바로잡기 steer)")}`;
 		if (state.notice) return theme.span(state.noticeKind === "error" ? "error" : state.noticeKind === "success" ? "success" : "muted", ` ${state.notice}`);
 		if (state.liveNotice) return theme.span("warning", ` ${state.liveNotice}`);
 		return "";
@@ -398,7 +421,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		const selector = state.profile.model;
 		const model = selector ? state.models?.list?.find((entry) => entry.selector === selector) : null;
 		const segments = statusSegments({
-			ask: state.ask,
+			ask: client.active,
 			spinnerFrame,
 			session: state.session ? { ...state.session, title: clipLine(state.session.title || state.session.id, third), project: clipLine(placeOf(state.session) || state.session.provider || "", Math.floor(third * 0.75)) } : null,
 			conversation: clipLine(state.thread ? state.focus?.label || "선택한 대화" : "세션 전체 대화", third),
@@ -594,10 +617,11 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			command("설정", "settings", "config model depth profile", "설명 깊이, 모델, 미리 설명, 프로필", () => setDraftText("$")),
 			command("새로고침", "refresh", "reload", "목록과 대화를 다시 불러오고 끊긴 설명에 다시 연결", rejoinOrRefresh),
 		];
-		if (state.ask) items.push(
+		if (client.active) items.push(
 			command("바로잡기", "steer", "", "진행 중인 설명의 방향 고치기", toggleSteer),
 			command("중단", "stop", "cancel", "진행 중인 설명 멈추기", () => void cancelActiveAsk()),
 		);
+		if (client.queue.length) items.push(command("대기", "queue", "edit unqueue", "마지막 대기 질문을 입력창에 돌려놓고 고치거나 지우기", unqueueLast));
 		items.push(command("종료", "exit", "quit", "터미널만 닫기. 서버와 보낸 설명 요청은 유지", exit));
 		return items;
 	}
@@ -629,7 +653,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		api.models().then((catalog) => {
 			state.models = { loading: false, list: Array.isArray(catalog?.models) ? catalog.models : [] };
 		}).catch((error) => {
-			state.models = { loading: false, list: [], error: terminalSafeText(error.message) };
+			state.models = { loading: false, list: [], error: terminalSafeText(reason(error)) };
 		}).finally(scheduleRender);
 	}
 
@@ -640,7 +664,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			state.profiles = state.profiles.map((entry) => entry.id === updated.id ? updated : entry);
 			if (selectedProfileId(state.profile) === updated.id) state.profile = updated;
 			succeed(message);
-		} catch (error) { failNotice(`설정을 바꾸지 못했어요: ${error.message}`); }
+		} catch (error) { failNotice(`설정을 바꾸지 못했어요: ${reason(error)}`); }
 	}
 
 	function settingsItems() {
@@ -768,7 +792,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			state.pickerIndex.answers = Math.min(state.pickerIndex.answers, Math.max(0, displayedHistory().length - 1));
 			scheduleRender();
 		} catch (error) {
-			if (generation === historyGeneration) failNotice(`이전 대화를 불러오지 못했어요: ${error.message}`);
+			if (generation === historyGeneration) failNotice(`이전 대화를 불러오지 못했어요: ${reason(error)}`);
 		}
 	}
 
@@ -812,58 +836,63 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		if (state.cards.length !== before) scheduleRender();
 	}
 
-	async function keepLive(session, profile, signal, generation) {
-		let backoff = 500;
-		while (state.running && !signal.aborted && generation === sessionGeneration) {
-			try {
-				await api.events(session.id, selectedProfileId(profile), signal, (event) => {
-					if (generation !== sessionGeneration || signal.aborted || state.session?.id !== session.id || selectedProfileId(state.profile) !== selectedProfileId(profile)) return;
-					handleEvent(event);
-				});
-				if (!signal.aborted) {
-					state.liveNotice = "실시간 연결이 닫혔어요. 다시 연결하는 중이에요.";
-					scheduleRender();
-				}
-				backoff = 500;
-			} catch (error) {
-				if (signal.aborted || !state.running) return;
-				state.liveNotice = `실시간 연결에 실패했어요: ${terminalSafeText(error.message)}`;
-				scheduleRender();
-			}
-			await new Promise((resolve) => {
-				const done = () => {
-					clearTimeout(timer);
-					signal.removeEventListener("abort", done);
-					resolve();
-				};
-				const timer = setTimeout(done, backoff);
-				signal.addEventListener("abort", done, { once: true });
-				if (signal.aborted) done();
-			});
-			backoff = Math.min(backoff * 2, 8000);
+	/** session-client 의 변화를 화면에 옮긴다. 미리 설명과 다른 화면이 보낸 질문은 그리지 않는다(답은 record 사건으로 다시 불러온다). */
+	function applyChange(change) {
+		if (change.type === "live") { handleEvent(change.event); return; }
+		if (change.type === "live-status") {
+			state.liveNotice = change.status === "closed" ? "실시간 연결이 닫혔어요. 다시 연결하는 중이에요." : `실시간 연결에 실패했어요: ${terminalSafeText(change.error)}`;
+			scheduleRender();
+			return;
 		}
+		if (change.type === "end") { void finishAsk(change.job, change.outcome); return; }
+		if (change.type === "queue" && change.dropped?.length) {
+			// 세션·프로필을 바꾸면 대기 질문은 보내지 않고 원래 대화의 빈 입력창으로만 돌아간다. 돌려놓지 못한 질문은 알린다.
+			const lost = change.dropped.filter((job) => !change.restored.includes(job));
+			const back = change.restored.length ? `대기 질문 ${change.restored.length}개는 원래 대화의 입력창에 돌려놨어요. ` : "";
+			if (lost.length) failNotice(`${back}보내지 못한 대기 질문 ${lost.length}개는 입력창에 이미 글이 있어 돌려놓지 못했어요: ${lost.map((job) => clipLine(job.question, 40)).join(", ")}`);
+			else inform(back.trim());
+			return;
+		}
+		if (change.job?.auto || change.job?.detached) return;
+		if (change.error) failNotice(`설명 요청에 실패했어요: ${change.error} 서버의 요청은 계속될 수 있어요. Ctrl+R 키로 같은 요청에 다시 연결하세요.`);
+		if (change.type === "job" && !change.event) {
+			state.followSelection = false;
+			state.followBottom = true;
+		}
+		scheduleRender();
 	}
 
-	async function restoreJob(session, profile, generation) {
-		try {
-			const jobs = await api.jobs(session.id, selectedProfileId(profile));
-			if (!state.running || generation !== sessionGeneration || state.ask || !Array.isArray(jobs)) return;
-			const job = jobs.find((entry) => !entry.auto);
-			if (!job?.requestId || typeof job.question !== "string") return;
-			const focus = job.focus?.text ? { label: String(job.focus.label || "질문 대상").slice(0, 200), text: job.focus.text } : null;
-			const ask = {
-				requestId: job.requestId, sessionId: session.id, profileId: selectedProfileId(profile), question: job.question,
-				focus, thread: typeof job.thread === "string" ? job.thread : "", text: "", stage: requestStatus({ type: "stage", stage: job.stage }), steers: [], cancelling: false, startedAt: Date.parse(job.startedAt ?? "") || Date.now(),
-			};
-			const body = { id: session.id, profileId: ask.profileId, question: ask.question, requestId: ask.requestId };
-			if (focus) body.focus = focus;
-			if (job.difficulty) body.difficulty = job.difficulty;
-			state.ask = ask;
-			inform("진행 중인 설명에 다시 연결했어요.");
-			void consumeAsk(ask, body);
-		} catch (error) {
-			if (generation === sessionGeneration) failNotice(`진행 중인 요청을 확인하지 못했어요: ${error.message}`);
+	async function finishAsk(job, outcome) {
+		if (!job.auto && !job.detached) {
+			if (outcome.type === "answer") {
+				// 저장된 대화를 다시 불러올 때까지 받은 설명을 그대로 보여 준다. 그 사이 다음 대기 질문이 시작될 수 있다.
+				state.settling = job;
+				inform("설명이 끝났어요. 저장된 대화를 불러오는 중이에요.");
+				await reloadHistory();
+				if (state.settling === job) state.settling = null;
+				succeed("설명이 끝났어요.");
+			} else if (outcome.type === "cancelled") restoreCancelledQuestion(job, outcome.restored);
+			else failNotice(`설명을 만들지 못했어요: ${outcome.error || "서버 오류"}`);
 		}
+		if (!client.active && state.purpose === "steer") state.purpose = "ask";
+		scheduleRender();
+	}
+
+	/** 서버에 남은 진행 중인 설명에 같은 requestId 로 다시 붙고, 그 설명의 스레드(서버가 준 값)로 간다. */
+	async function rejoin(generation) {
+		const before = client.active;
+		try {
+			await client.rejoin();
+		} catch (error) {
+			if (generation === sessionGeneration) failNotice(`진행 중인 요청을 확인하지 못했어요: ${reason(error)}`);
+			return;
+		}
+		const job = client.active;
+		if (!state.running || generation !== sessionGeneration || !job || job === before) return;
+		state.thread = job.thread;
+		state.focus = job.focus;
+		state.selectedAnswer = null;
+		inform("진행 중인 설명에 다시 연결했어요.");
 	}
 
 	async function refreshSessions() {
@@ -874,7 +903,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			const current = list.findIndex((entry) => entry.id === state.session?.id);
 			state.pickerIndex.sessions = current >= 0 ? current : Math.min(state.pickerIndex.sessions, Math.max(0, list.length - 1));
 			inform(`세션 목록을 새로 불러왔어요. ${list.length}개`);
-		} catch (error) { failNotice(`세션 목록을 불러오지 못했어요: ${error.message}`); }
+		} catch (error) { failNotice(`세션 목록을 불러오지 못했어요: ${reason(error)}`); }
 	}
 
 	async function switchSession(session) {
@@ -887,15 +916,16 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		state.focus = null;
 		state.thread = "";
 		state.selectedAnswer = null;
-		if (state.purpose === "steer" && !(state.ask && state.ask.sessionId === session.id && state.ask.profileId === selectedProfileId(state.profile))) state.purpose = "ask";
+		state.settling = null;
+		state.purpose = "ask";
 		state.liveNotice = "";
 		state.notice = "이전 대화를 불러오는 중이에요.";
 		state.noticeError = false;
 		state.noticeKind = "info";
 		historyGeneration++;
 		const generation = ++sessionGeneration;
-		streamController?.abort();
-		streamController = new AbortController();
+		// 이전 세션의 설명 스트림은 놓는다(서버 작업은 계속). 돌아오면 rejoin 으로 다시 붙는다.
+		client.open({ profileId: selectedProfileId(state.profile), sessionId: session.id });
 		state.picker = null;
 		state.bodyScroll = 0;
 		state.followSelection = false;
@@ -907,13 +937,13 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			]);
 			if (!state.running || generation !== sessionGeneration) return;
 			state.history = Array.isArray(rows) ? rows : [];
-			state.notice = "";
+			if (state.notice === "이전 대화를 불러오는 중이에요.") state.notice = "";
 			scheduleRender();
 		} catch (error) {
-			if (generation === sessionGeneration) failNotice(`이전 대화를 불러오지 못했어요: ${error.message}`);
+			if (generation === sessionGeneration) failNotice(`이전 대화를 불러오지 못했어요: ${reason(error)}`);
 		}
-		if (state.running && generation === sessionGeneration) void keepLive(session, state.profile, streamController.signal, generation);
-		if (state.running && generation === sessionGeneration) void restoreJob(session, state.profile, generation);
+		if (state.running && generation === sessionGeneration) void client.follow();
+		if (state.running && generation === sessionGeneration) void rejoin(generation);
 	}
 
 	async function chooseProfile(profile) {
@@ -930,6 +960,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		inform(`프로필을 ${profileName(profile)} 으로 바꿨어요.`);
 		if (state.session) await switchSession(state.session);
 		else {
+			client.close();
 			state.picker = "sessions";
 			state.pickerIndex.sessions = 0;
 			state.bodyScroll = 0;
@@ -987,7 +1018,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			scheduleRender();
 			return;
 		}
-		if (!state.ask) { inform("바로잡을 진행 중인 설명이 없어요. 설명이 진행되면 Ctrl+S 로 전환하세요."); return; }
+		if (!client.active) { inform("바로잡을 진행 중인 설명이 없어요. 설명이 진행되면 Ctrl+S 로 전환하세요."); return; }
 		state.purpose = "steer";
 		scheduleRender();
 	}
@@ -997,139 +1028,79 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		const text = draft.text.trim();
 		if (!text) { failNotice("보낼 내용을 입력하세요."); return; }
 		if (state.purpose === "steer") {
-			const target = state.ask;
-			if (!target) { failNotice("바로잡을 진행 중인 설명이 없어요."); return; }
+			if (!client.active) { failNotice("바로잡을 진행 중인 설명이 없어요."); return; }
 			const message = text;
 			const key = draftKey();
 			clearDraft(key);
 			state.purpose = "ask";
 			inform("");
 			try {
-				await api.steer(target.profileId, target.requestId, message);
-				if (!target.steers.includes(message)) target.steers.push(message);
+				if (!await client.steer(message)) throw new Error("바로잡을 진행 중인 설명이 없어요.");
 				inform("바로잡기를 보냈어요.");
 			} catch (error) {
 				state.drafts.set(key, { text: message, cursor: graphemes(message).length, preferredColumn: null });
-				failNotice(`바로잡기를 보내지 못했어요: ${error.message}`);
+				failNotice(`바로잡기를 보내지 못했어요: ${reason(error)}`);
 			}
 			return;
 		}
 		if (!state.session) { inform("먼저 세션을 고르세요. @ 를 입력하면 세션 목록이 나와요."); return; }
-		if (state.ask) {
-			inform(`${state.ask.sessionId === state.session.id ? "설명이" : "다른 세션의 설명이"} 진행 중이에요. ${state.ask.disconnected ? "Ctrl+R 키로 같은 요청에 다시 연결하세요." : "Ctrl+S 로 바로잡거나 Ctrl+C 로 중단하세요."}`);
-			return;
-		}
-		const session = state.session;
-		const profile = state.profile;
-		const focus = state.focus ? { label: state.focus.label, text: state.focus.text } : null;
-		const requestId = randomUUID();
-		const ask = {
-			requestId, sessionId: session.id, profileId: selectedProfileId(profile), question: text,
-			focus, thread: state.thread, text: "", stage: "요청을 보내는 중이에요", steers: [], cancelling: false, startedAt: Date.now(),
-		};
-		state.ask = ask;
-		inform("");
+		// 설명이 진행 중이면(연결이 끊겼어도) 대기 질문이 되어 지금 설명이 끝난 뒤 차례대로 나간다 (ADR 0029 §4).
+		const job = client.ask({ question: text, focus: state.focus, thread: state.thread });
 		clearDraft();
 		state.picker = null;
 		state.bodyScroll = 0;
 		state.followSelection = false;
 		state.followBottom = true;
-		const body = { id: session.id, profileId: ask.profileId, question: text, requestId };
-		if (focus) body.focus = focus;
-		body.cards = cardsPayload(state.cards.map((card) => ({ thread: card.thread, label: card.displayTitle || card.focus.label })));
-		void consumeAsk(ask, body);
+		if (job && client.queue.includes(job)) inform("대기 질문으로 보냈어요. 지금 설명이 끝나면 이어서 보내요.");
+		else inform("");
 	}
 
-	function restoreCancelledQuestion(ask) {
-		if (state.ask !== ask) return;
-		state.ask = null;
+	/** 중단한 질문은 서버가 알려 준 그 질문의 스레드로 돌아간다. 입력창 복원은 session-client 가 빈 입력창에만 한다. */
+	function restoreCancelledQuestion(job, restored) {
 		if (state.purpose === "steer") state.purpose = "ask";
-		if (state.session?.id === ask.sessionId && selectedProfileId(state.profile) === ask.profileId) {
-			state.focus = ask.focus;
-			state.thread = ask.thread;
-			state.picker = null;
-			state.selectedAnswer = null;
-			state.bodyScroll = 0;
-			state.followSelection = false;
-			state.followBottom = true;
-			// The cancelled question returns to the composer only when its context draft is
-			// empty; a newer draft typed while the ask ran stays untouched.
-			const key = draftKey();
-			const existing = state.drafts.get(key);
-			if (existing?.text?.trim()) {
-				inform(`설명을 중단했어요. 새로 쓴 질문은 그대로 두었어요. 보낸 질문: ${clipLine(ask.question, Math.max(16, width() - 40))}`);
-			} else {
-				state.drafts.set(key, { text: ask.question, cursor: graphemes(ask.question).length, preferredColumn: null });
-				inform("설명을 중단했어요. 보낸 질문을 입력창에 돌려놨어요.");
-			}
-		} else inform("다른 세션의 설명을 중단했어요.");
-	}
-
-	async function consumeAsk(ask, body) {
-		if (ask.disconnected) ask.text = "";
-		ask.disconnected = false;
-		ask.body = body;
+		state.focus = job.focus;
+		state.thread = job.thread;
+		state.picker = null;
+		state.selectedAnswer = null;
+		state.bodyScroll = 0;
 		state.followSelection = false;
 		state.followBottom = true;
-		state.bodyScroll = Number.MAX_SAFE_INTEGER;
-		const controller = new AbortController();
-		askController = controller;
-		scheduleRender();
-		try {
-			const outcome = await api.ask(body, controller.signal, (event) => {
-				if (state.ask !== ask) return;
-				if (event.type === "queued" || event.type === "stage") ask.stage = requestStatus(event);
-				else if (event.type === "delta") ask.text += String(event.text ?? "");
-				else if (event.type === "reset") ask.text = "";
-				else if (event.type === "steer" && typeof event.message === "string" && !ask.steers.includes(event.message)) ask.steers.push(event.message);
-				else if (event.type === "error") ask.error = terminalSafeText(event.error || "설명 요청에 실패했어요.");
-				scheduleRender();
-			});
-			if (outcome.type === "answer") {
-				inform("설명이 끝났어요. 저장된 대화를 불러오는 중이에요.");
-				if (state.session?.id === ask.sessionId && selectedProfileId(state.profile) === ask.profileId) await reloadHistory();
-				succeed("설명이 끝났어요.");
-			} else if (outcome.type === "cancelled") restoreCancelledQuestion(ask);
-			else failNotice(`설명을 만들지 못했어요: ${outcome.error || "서버 오류"}`);
-		} catch (error) {
-			if (!controller.signal.aborted) {
-				ask.disconnected = !error.status;
-				if (ask.disconnected) ask.stage = "연결 끊김";
-				failNotice(`설명 요청에 실패했어요: ${error.message}${ask.disconnected ? " 서버의 요청은 계속될 수 있어요. Ctrl+R 키로 같은 요청에 다시 연결하세요." : ""}`);
-			}
-		} finally {
-			if (state.ask === ask && !ask.disconnected) state.ask = null;
-			if (askController === controller) askController = null;
-			if (!state.ask && state.purpose === "steer") state.purpose = "ask";
-			scheduleRender();
-		}
+		if (restored) inform("설명을 중단했어요. 보낸 질문을 입력창에 돌려놨어요.");
+		else inform(`설명을 중단했어요. 새로 쓴 질문은 그대로 두었어요. 보낸 질문: ${clipLine(job.question, Math.max(16, width() - 40))}`);
+	}
+
+	/** /대기: 마지막 대기 질문을 그 스레드의 입력창으로 돌려놓는다. 고쳐서 다시 보내거나 지운다. */
+	function unqueueLast() {
+		const job = client.queue.at(-1);
+		if (!job || !client.unqueue(job)) { inform("대기 질문이 없어요."); return; }
+		state.focus = job.focus;
+		state.thread = job.thread;
+		state.selectedAnswer = null;
+		const draft = currentDraft();
+		const text = draft.text.trim() ? `${draft.text}\n${job.question}` : job.question;
+		setDraftText(text);
+		inform("대기 질문을 입력창에 돌려놨어요. 고쳐서 Enter 로 다시 보내거나 지우세요.");
 	}
 
 	async function cancelActiveAsk() {
-		const ask = state.ask;
-		if (!ask || ask.cancelling) {
-			if (!ask) inform("진행 중인 설명이 없어요.");
-			return;
-		}
-		ask.cancelling = true;
+		const ask = client.active;
+		if (!ask) { inform("진행 중인 설명이 없어요."); return; }
+		if (ask.cancelling) return;
 		inform("설명을 멈추는 중이에요.");
 		try {
-			const result = await api.cancel(ask.profileId, ask.requestId);
-			if (!result?.cancelled) {
-				ask.cancelling = false;
-				failNotice("서버에서 진행 중인 요청을 찾지 못했어요. Ctrl+R 키로 결과를 확인하세요.");
-			} else if (ask.disconnected) restoreCancelledQuestion(ask);
+			const result = await client.stop();
+			if (result && !result.cancelled) failNotice("서버에서 진행 중인 요청을 찾지 못했어요. Ctrl+R 키로 결과를 확인하세요.");
 		} catch (error) {
-			ask.cancelling = false;
-			failNotice(`중단 요청을 보내지 못했어요: ${error.message}`);
+			failNotice(`중단 요청을 보내지 못했어요: ${reason(error)}`);
 		}
 	}
 
 	function rejoinOrRefresh() {
-		if (state.ask) {
-			if (!state.ask.body) { failNotice("다시 연결할 요청 정보가 없어요."); return; }
-			if (!state.ask.disconnected) { inform("설명에 연결되어 있어요. 새 요청을 만들지 않았어요."); return; }
-			void consumeAsk(state.ask, state.ask.body);
+		const ask = client.active;
+		if (ask) {
+			if (!ask.disconnected) { inform("설명에 연결되어 있어요. 새 요청을 만들지 않았어요."); return; }
+			client.resume(ask);
+			inform("");
 			return;
 		}
 		if (state.picker === "sessions" || !state.session) { void refreshSessions(); return; }
@@ -1159,10 +1130,10 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 
 	/** Herdr agents 창: 직접 물은 설명만 작업 중으로 알린다. 미리 설명은 서버 쪽 일이라 알리지 않는다 (ADR 0043). */
 	function syncHerdr() {
-		const ask = state.ask;
+		const ask = client.active;
 		if (!ask) herdr.update("idle");
 		else if (ask.disconnected) herdr.update("blocked", "설명 연결이 끊겼어요. Ctrl+R로 다시 연결하세요.");
-		else herdr.update("working", ask.cancelling ? "설명을 멈추는 중이에요" : ask.stage || "설명을 준비하는 중이에요");
+		else herdr.update("working", ask.cancelling ? "설명을 멈추는 중이에요" : stageText(ask));
 	}
 
 	function exit() {
@@ -1170,8 +1141,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		state.running = false;
 		clearTimeout(renderTimer);
 		clearInterval(spinnerTimer);
-		streamController?.abort();
-		askController?.abort();
+		client.close();
 		input.close();
 		stdin.off("data", onData);
 		stdin.off("end", onEnd);
