@@ -1,10 +1,10 @@
 // 도슨트 로컬 웹앱. 서버는 Node 내장 모듈, 설명 렌더러는 로컬 빌드 자산을 사용한다.
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { claudeAdapter } from "../scripts/transcript-claude.mjs";
 import { ompAdapter } from "../scripts/transcript-omp.mjs";
@@ -12,13 +12,10 @@ import { codexAdapter } from "../scripts/transcript-codex.mjs";
 import { geminiAdapter } from "../scripts/transcript-gemini.mjs";
 import { piAdapter } from "../scripts/transcript-pi.mjs";
 import { jevEnabled } from "./jev.mjs";
-import { watchSession } from "./live.mjs";
+import { localProviders, sessionCatalog } from "./catalog.mjs";
 import { glossary } from "./review.mjs";
 import { KEYWORD_PROMPT, extractInput, parseExtract, wiki } from "./wiki.mjs";
 import { parsePeers, peerProvider } from "./peers.mjs";
-import { gitLocationOf, headOf } from "./repo.mjs";
-import { recentLine } from "./session-recent.mjs";
-import { pickFromTail, readHead } from "./session-file.mjs";
 import { config, favorites, history, saveConfig, saveKeywords, setFavorite } from "./store.mjs";
 import { resolveEvidence } from "./evidence.mjs";
 import { modelCatalog, selectedModel } from "./models.mjs";
@@ -41,6 +38,8 @@ const STATIC_ASSETS = new Map([
 	["/mobile.css", ["mobile.css", "text/css; charset=utf-8"]],
 	["/mobile.mjs", ["mobile.mjs", "text/javascript; charset=utf-8"]],
 	["/conversations.mjs", ["conversations.mjs", "text/javascript; charset=utf-8"]],
+	["/transport.mjs", ["transport.mjs", "text/javascript; charset=utf-8"]],
+	["/session-client.mjs", ["session-client.mjs", "text/javascript; charset=utf-8"]],
 	["/manifest.webmanifest", ["manifest.webmanifest", "application/manifest+json; charset=utf-8"]],
 	["/sw.js", ["sw.js", "text/javascript; charset=utf-8"]],
 	["/offline.html", ["offline.html", "text/html; charset=utf-8"]],
@@ -56,9 +55,6 @@ const HOST = HOST_INPUT === "tailscale" ? "127.0.0.1" : HOST_INPUT;
 const PEERS = parsePeers(process.env.DOCENT_PEERS, CONFIG.peers);
 const OMP_BIN = process.env.OMP_BIN ?? "omp";
 const OMP_TIMEOUT_MS = 180_000;
-const MAX_SESSION_BYTES = 80 * 1024 * 1024;
-const TRANSCRIPT_CACHE = 8;
-const transcripts = new Map();
 
 const HOME = process.env.HOME ?? homedir();
 
@@ -74,134 +70,11 @@ async function tailscaleIp() {
 
 const TAILSCALE_RETRY_MS = [5_000, 10_000, 30_000, 60_000];
 
-/** 작업 폴더의 git 위치(저장소, 워크트리, gitdir). 폴더 구조는 잘 바뀌지 않아 폴더별로 기억한다. */
-const gitPlaceOf = (() => {
-	const cache = new Map();
-	return async (cwd) => {
-		if (!cwd) return null;
-		if (!cache.has(cwd)) cache.set(cwd, await gitLocationOf(cwd));
-		return cache.get(cwd);
-	};
-})();
-
-// 최근 작업 한 줄은 꼬리부터 읽는다. 끝부분이 도구 결과뿐이면 한 번 더 넓게 읽는다.
-const RECENT_TAIL_BYTES = [256 * 1024, 2 * 1024 * 1024];
-
-/**
- * 목록에 보일 세션에만 브랜치, 워크트리, 최근 작업 한 줄을 붙인다. 브랜치는 바뀌므로 매번 HEAD 를 읽는다.
- * 다른 컴퓨터(peer) 세션은 그쪽 서버가 붙여 보낸 값을 그대로 쓴다.
- */
-async function describeSessions(sessions) {
-	const heads = new Map();
-	return Promise.all(sessions.map(async (session) => {
-		if (session.host) return session;
-		const place = await gitPlaceOf(session.cwd);
-		if (place?.gitdir && !heads.has(place.gitdir)) heads.set(place.gitdir, headOf(place.gitdir));
-		const head = place?.gitdir ? await heads.get(place.gitdir) : null;
-		const recent = await providerOf(session.id).recent?.(session.id).catch(() => "");
-		return { ...session, ...(place?.worktree ? { worktree: place.worktree } : {}), ...head, ...(recent ? { recent } : {}) };
-	}));
-}
-
-/**
- * 호스트 adapter 하나를 세션 제공자로. 파일은 `~/<adapter.dir>` 아래 `depth` 단계 폴더 안에 있고 이름이 `match` 와 맞아야 한다.
- * 파일을 읽는 일은 session-file.mjs, 읽은 글의 해석(목록 메타·숨김, 전사, 사건 카드)은 adapter 가 한다.
- * `adapter.stamp(path)` 는 본 파일 밖에서 전사에 들어가는 것(예: 서브에이전트 파일)의 변경 표시다.
- */
-function jsonlProvider(adapter) {
-	const { id, depth = 1, match = /\.jsonl$/, headBytes } = adapter;
-	const root = join(HOME, adapter.dir);
-	const metas = new Map();
-	const recents = new Map();
-	const walk = async (dir, level) => {
-		const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
-		const found = [];
-		for (const entry of entries) {
-			const path = join(dir, entry.name);
-			if (level < depth) {
-				if (entry.isDirectory()) found.push(...await walk(path, level + 1));
-			} else if (entry.isFile() && match.test(entry.name)) found.push(path);
-		}
-		return found;
-	};
-	return {
-		id,
-		root,
-		events: adapter.events,
-		/** 머리 읽기는 파일이 바뀐 것만. 이어 쓰는 세션은 머리가 한 번 다 찼으면 다시 읽지 않는다. */
-		async list() {
-			const out = [];
-			for (const path of await walk(root, 0)) {
-				const st = await stat(path).catch(() => null);
-				if (!st?.size) continue;
-				const cached = metas.get(path);
-				let m;
-				if (cached && (cached.mtimeMs === st.mtimeMs || (cached.m && cached.full && st.size >= cached.size))) m = cached.m;
-				else {
-					m = await adapter.meta(await readHead(path, headBytes), path);
-					metas.set(path, { mtimeMs: st.mtimeMs, size: st.size, full: st.size >= headBytes, m });
-				}
-				if (!m) continue;
-				const rel = path.slice(root.length + 1);
-				out.push({
-					id: `${id}:${rel}`,
-					provider: id,
-					title: m.title,
-					project: m.cwd ? basename(m.cwd) : rel.split("/")[0],
-					...(m.cwd ? { repo: (await gitPlaceOf(m.cwd))?.repo ?? null } : {}),
-					cwd: m.cwd,
-					started: m.started,
-					updated: st.mtime.toISOString(),
-					bytes: st.size,
-					first: m.first ?? null,
-					host: null,
-				});
-			}
-			return out;
-		},
-		pathOf(sid) {
-			const path = resolve(root, sid.slice(id.length + 1));
-			if (!path.startsWith(`${root}/`) || !path.endsWith(".jsonl")) throw httpError(400, "bad session id");
-			return path;
-		},
-		/** 최근 작업 한 줄. 파일이 바뀌었을 때만 꼬리를 다시 읽는다. */
-		async recent(sid) {
-			const path = this.pathOf(sid);
-			const st = await stat(path);
-			const cached = recents.get(path);
-			if (cached?.mtimeMs === st.mtimeMs) return cached.line;
-			const line = await pickFromTail(path, RECENT_TAIL_BYTES, (tail) => recentLine(adapter.events(tail)), st.size);
-			recents.set(path, { mtimeMs: st.mtimeMs, line });
-			return line;
-		},
-		/** 같은 파일(크기·수정 시각·stamp)이면 정규화 결과를 다시 쓴다. 질문·원문 보기·전사 보기가 함께 쓴다. */
-		async transcript(sid) {
-			const path = this.pathOf(sid);
-			const st = await stat(path);
-			if (st.size > MAX_SESSION_BYTES) throw httpError(413, "session too large");
-			const version = `${st.size}:${st.mtimeMs}:${adapter.stamp ? await adapter.stamp(path) : ""}`;
-			const cached = transcripts.get(path);
-			if (cached?.version === version) return cached.md;
-			const md = await adapter.transcript(await readFile(path, "utf8"), path);
-			transcripts.delete(path);
-			transcripts.set(path, { version, md });
-			while (transcripts.size > TRANSCRIPT_CACHE) transcripts.delete(transcripts.keys().next().value);
-			return md;
-		},
-	};
-}
-
 // 호스트별 세션 제공자. 새 호스트는 adapter 모듈 하나 + 여기 한 줄. 뒤에 원격 docent(peers)가 붙는다.
-const providers = [
-	...[ompAdapter, claudeAdapter, codexAdapter, geminiAdapter, piAdapter].map((adapter) => jsonlProvider(adapter)),
+const catalog = sessionCatalog([
+	...localProviders([ompAdapter, claudeAdapter, codexAdapter, geminiAdapter, piAdapter], { home: HOME }),
 	...Object.entries(PEERS).map(([name, base]) => peerProvider(name, base)),
-];
-
-const providerOf = (id) => {
-	const p = providers.find((p) => (p.owns ? p.owns(id) : id.startsWith(`${p.id}:`)));
-	if (!p) throw httpError(400, "unknown provider");
-	return p;
-};
+]);
 
 const json = (r, code, body) => {
 	r.writeHead(code, { "content-type": "application/json; charset=utf-8" });
@@ -234,7 +107,7 @@ const runner = await createRunner({ bin: OMP_BIN, tmpRoot, timeoutMs: OMP_TIMEOU
 const extracting = new Map();
 const asks = createAsk({
 	runner,
-	providerOf,
+	providerOf: catalog.providerOf,
 	prompts: { docent: PROMPT, planner: plannerPrompt, domains: domainsPrompt },
 	notify: (sessionId, profileId, payload) => hub.notify(sessionId, profileId, payload),
 });
@@ -274,10 +147,7 @@ async function body(req) {
 }
 
 const hub = prefetchHub({
-	watch: (sessionId, emit) => {
-		const p = providerOf(sessionId);
-		return p.live ? p.live(sessionId, emit) : watchSession(p.pathOf(sessionId), p, emit);
-	},
+	watch: catalog.watch,
 	profile,
 	startJob: asks.open,
 	hasJob: asks.has,
@@ -322,7 +192,7 @@ async function evidenceFor(sessionId, ref, profileId) {
 	const saved = rows.flatMap((row) => row.answer?.citations ?? []).find((citation) => citation.id === ref && citation.sessionId === sessionId);
 	if (!saved) throw httpError(404, "이 프로필이 저장한 근거를 찾을 수 없어요.");
 	try {
-		const result = resolveEvidence(await providerOf(sessionId).transcript(sessionId), sessionId, ref);
+		const result = resolveEvidence(await catalog.transcript(sessionId), sessionId, ref);
 		if (result.available) return result;
 	} catch {
 		// 원격 오프라인·원본 삭제도 저장된 근거와 구분해서 보여 준다.
@@ -371,22 +241,12 @@ const handler = async (req, res) => {
 		if (req.method === "GET" && url.pathname === "/api/evidence") {
 			return json(res, 200, await evidenceFor(url.searchParams.get("id"), url.searchParams.get("ref"), url.searchParams.get("profileId") ?? "default"));
 		}
-		if (req.method === "GET" && url.pathname === "/api/sessions") {
-			const all = (await Promise.all(providers.map((p) => p.list()))).flat();
-			all.sort((a, b) => (a.updated < b.updated ? 1 : -1));
-			return json(res, 200, await describeSessions(all.slice(0, 200)));
-		}
-		if (req.method === "GET" && url.pathname === "/api/sessions/resolve") {
-			// 에이전트가 자기 세션 파일 경로를 알려 주면 도슨트 세션 id 로 바꾼다 (docent herdr, ADR 0044). 이 컴퓨터의 제공자만 본다.
-			const path = resolve(url.searchParams.get("path") ?? "");
-			const provider = providers.find((p) => p.root && path.startsWith(`${p.root}/`) && path.endsWith(".jsonl"));
-			// 아직 저장되지 않은 새 세션(첫 메시지 전)은 열 수 없으니 없다고 답한다. 호출자는 폴더 기준 최근 세션으로 넘어간다.
-			if (!provider || !(await stat(path).catch(() => null))?.size) return json(res, 404, { error: "이 파일은 도슨트가 읽는 세션 폴더에 없거나 아직 비어 있어요." });
-			return json(res, 200, { id: `${provider.id}:${path.slice(provider.root.length + 1)}` });
-		}
+		if (req.method === "GET" && url.pathname === "/api/sessions") return json(res, 200, await catalog.list());
+		// 에이전트가 자기 세션 파일 경로를 알려 주면 도슨트 세션 id 로 바꾼다 (docent herdr, ADR 0044). 목록에 없는 파일·빈 파일은 404, 호출자는 폴더 기준 최근 세션으로 넘어간다.
+		if (req.method === "GET" && url.pathname === "/api/sessions/resolve") return json(res, 200, { id: await catalog.resolve(url.searchParams.get("path") ?? "") });
 		if (req.method === "GET" && url.pathname === "/api/transcript") {
 			const id = url.searchParams.get("id") ?? "";
-			const md = await providerOf(id).transcript(id);
+			const md = await catalog.transcript(id);
 			res.writeHead(200, { "content-type": "text/markdown; charset=utf-8" });
 			return res.end(md);
 		}
@@ -410,13 +270,14 @@ const handler = async (req, res) => {
 		if (req.method === "GET" && url.pathname === "/api/live") {
 			const id = url.searchParams.get("id") ?? "";
 			const profileId = url.searchParams.get("profileId");
-			const p = providerOf(id);
+			// 모르는 세션 id, 잘못된 id 는 스트림을 열기 전에 400 으로 답한다.
+			catalog.providerOf(id);
 			if (profileId) await profile(profileId);
 			res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
 			res.write(`: jev=${jevEnabled}\n\n`);
 			const send = (ev) => res.write(`data: ${JSON.stringify(ev)}\n\n`);
 			// 프로필 없이 여는 구독(다른 컴퓨터의 docent)은 미리 설명을 예약하지 않는다.
-			const stop = profileId ? hub.subscribe({ sessionId: id, profileId, send }) : p.live ? p.live(id, send) : watchSession(p.pathOf(id), p, send);
+			const stop = profileId ? hub.subscribe({ sessionId: id, profileId, send }) : catalog.watch(id, send);
 			const ping = setInterval(() => res.write(": ping\n\n"), 15_000);
 			req.on("close", () => {
 				stop();

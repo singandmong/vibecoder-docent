@@ -1,10 +1,11 @@
-// 다른 컴퓨터의 docent 를 세션 제공자로 (ADR 0011). 세션 목록·전사·라이브만 그쪽 API 에서 받아 온다.
+// 다른 컴퓨터의 docent 를 세션 제공자로 (ADR 0011, interface 는 catalog.mjs, ADR 0056). 세션 목록·전사·라이브만 그쪽 API 에서 받아 온다.
 // 답은 여기 omp 가 만든다. 원격 세션 id 는 `@<이름>/<원래 id>`.
-// 원격 프로필 ID는 로컬 사용자와 동일인임을 보장하지 않으므로 문답 역사는 가져오지 않는다.
+// 원격 프로필 ID는 로컬 사용자와 동일인임을 보장하지 않으므로 문답 역사는 가져오지 않는다 (ADR 0014).
 const LIST_TIMEOUT_MS = 5000;
 const FETCH_TIMEOUT_MS = 30_000;
 
-export function peerProvider(name, base) {
+/** `fetch` 는 HTTP 연결 자리다. 시험은 메모리 안의 가짜를 넘긴다. */
+export function peerProvider(name, base, { fetch = globalThis.fetch } = {}) {
 	const prefix = `@${name}/`;
 	const url = (path, sid) => `${base.replace(/\/$/, "")}${path}?id=${encodeURIComponent(sid.slice(prefix.length))}`;
 	const get = async (u, ms) => {
@@ -16,6 +17,8 @@ export function peerProvider(name, base) {
 		id: `@${name}`,
 		host: name,
 		owns: (sid) => sid.startsWith(prefix),
+		/** 원격 id 의 나머지 모양은 그쪽 서버가 판단한다. */
+		check() {},
 		async list() {
 			try {
 				const r = await get(`${base.replace(/\/$/, "")}/api/sessions`, LIST_TIMEOUT_MS);
@@ -25,11 +28,13 @@ export function peerProvider(name, base) {
 				return [];
 			}
 		},
+		/** 저장소·브랜치·최근 작업은 그쪽 서버가 자기 파일로 붙여 보냈다. 여기 폴더로 다시 찾지 않는다. */
+		describe: async (sessions) => sessions,
 		async transcript(sid) {
 			return (await get(url("/api/transcript", sid), FETCH_TIMEOUT_MS)).text();
 		},
 		/** 원격 SSE 를 그대로 흘려보낸다. stop 을 돌려준다. */
-		live(sid, send) {
+		watch(sid, send) {
 			const ctl = new AbortController();
 			(async () => {
 				try {
@@ -53,6 +58,8 @@ export function peerProvider(name, base) {
 			})();
 			return () => ctl.abort();
 		},
+		/** 다른 컴퓨터의 세션은 이 컴퓨터의 파일 경로가 없다. */
+		idOf: async () => null,
 	};
 }
 
