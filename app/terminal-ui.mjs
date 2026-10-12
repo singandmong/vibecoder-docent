@@ -128,6 +128,9 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		completion: { key: "", index: 0, dismissed: null }, models: null, favorites: null,
 	};
 	let renderTimer = null;
+	const FRAME_MS = 16;
+	let lastRenderAt = 0;
+	let painted = { size: "", rows: [] }; // 마지막으로 화면에 쓴 줄. 바뀐 줄만 다시 쓰는 기준
 	let streamController = null;
 	let historyGeneration = 0;
 	let sessionGeneration = 0;
@@ -156,8 +159,17 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		}
 	};
 	const divider = (items) => items.push({ text: "", role: "text" });
+	// 같은 글을 같은 너비로 다시 그리는 일이 많다(입력할 때마다, 설명 중 스피너마다). 결과를 너비별로 기억한다.
+	const markdownCache = new Map();
+	const MARKDOWN_CACHE_MAX = 400;
 	const addMarkdown = (items, text, role = "text") => {
-		for (const line of markdown.render(text, width())) items.push({ text: line, role, rich: true });
+		const key = `${width()}\u0000${text}`;
+		let lines = markdownCache.get(key);
+		if (lines) markdownCache.delete(key);
+		else lines = markdown.render(text, width());
+		markdownCache.set(key, lines);
+		if (markdownCache.size > MARKDOWN_CACHE_MAX) markdownCache.delete(markdownCache.keys().next().value);
+		for (const line of lines) items.push({ text: line, role, rich: true });
 	};
 
 	function displayedHistory() {
@@ -422,7 +434,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		const ask = state.ask;
 		if (ask?.disconnected) return theme.span("warning", " 연결이 끊겼어요. Ctrl+R로 같은 요청에 다시 연결해요.");
 		if (ask?.cancelling) return theme.span("warning", " 설명을 멈추는 중이에요");
-		if (ask) return `${theme.span("title", ` ${SPINNER[spinnerFrame]} `)}${theme.span("muted", `${ask.stage || "설명을 준비하는 중이에요"}`)}${theme.span("dim", " (/중단, /바로잡기)")}`;
+		if (ask) return `${theme.span("title", ` ${SPINNER[spinnerFrame]} `)}${theme.span("muted", `${ask.stage || "설명을 준비하는 중이에요"}`)}${theme.span("dim", " (/중단 stop, /바로잡기 steer)")}`;
 		if (state.notice) return theme.span(state.noticeKind === "error" ? "error" : state.noticeKind === "success" ? "success" : "muted", ` ${state.notice}`);
 		if (state.liveNotice) return theme.span("warning", ` ${state.liveNotice}`);
 		return "";
@@ -497,12 +509,25 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			...completion.map(paintRow),
 			...(showFooter ? footerLines(scroll).map((line) => theme.line("text", truncateToWidth(line, columns))) : []),
 		];
-		stdout.write(`${ESC}?2026h${ESC}2J${ESC}H${output.join("\r\n")}${ESC}?2026l`);
+		// 바뀐 줄만 다시 쓴다. 화면 크기나 줄 수가 바뀌면 전체를 다시 그린다.
+		const size = `${columns}x${rows}`;
+		if (painted.size !== size || painted.rows.length !== output.length) {
+			stdout.write(`${ESC}?2026h${ESC}2J${ESC}H${output.join("\r\n")}${ESC}?2026l`);
+		} else {
+			let patch = "";
+			for (let i = 0; i < output.length; i++) {
+				if (output[i] !== painted.rows[i]) patch += `${ESC}${i + 1};1H${ESC}0m${ESC}2K${output[i]}`;
+			}
+			if (patch) stdout.write(`${ESC}?2026h${patch}${ESC}?2026l`);
+		}
+		painted = { size, rows: output };
 	}
 
+	/** 입력 직후 바로 그리고, 설명 스트림이나 스피너처럼 잦은 갱신은 한 프레임(16ms)에 한 번으로 묶는다. */
 	function scheduleRender() {
 		if (renderTimer || !state.running) return;
-		renderTimer = setTimeout(() => { renderTimer = null; render(); }, 35);
+		const wait = Math.max(0, lastRenderAt + FRAME_MS - performance.now());
+		renderTimer = setTimeout(() => { renderTimer = null; lastRenderAt = performance.now(); render(); }, wait);
 	}
 
 	// --- Pickers: open/close/choose. Esc and picking never touch the keyed drafts. ---
@@ -617,19 +642,21 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		return false;
 	}
 
+	/** 명령은 한글과 영문 이름을 함께 보여 주고 둘 다로 고를 수 있다. 예: "/종료 (exit)", "/exit". */
+	const command = (ko, en, aliases, description, run) => ({ label: `/${ko} (${en})`, names: [ko, en], aliases, description, run });
 	function commandItems() {
 		const items = [
-			{ label: "/세션", aliases: "session", description: "함께 읽을 작업 세션 고르기", run: () => setDraftText("@") },
-			{ label: "/대화", aliases: "thread conversation card", description: "세션 전체 대화나 사건 카드 고르기", run: () => { if (needSession()) setDraftText("#"); } },
-			{ label: "/답변", aliases: "answer history", description: "이 대화에서 저장된 답변 다시 보기", run: () => { if (needSession()) togglePicker("answers"); } },
-			{ label: "/설정", aliases: "settings config model depth profile", description: "설명 깊이, 모델, 미리 설명, 프로필", run: () => setDraftText("$") },
-			{ label: "/새로고침", aliases: "refresh reload", description: "목록과 대화를 다시 불러오고 끊긴 설명에 다시 연결", run: rejoinOrRefresh },
+			command("세션", "session", "", "함께 읽을 작업 세션 고르기", () => setDraftText("@")),
+			command("대화", "thread", "conversation card", "세션 전체 대화나 사건 카드 고르기", () => { if (needSession()) setDraftText("#"); }),
+			command("답변", "answers", "history", "이 대화에서 저장된 답변 다시 보기", () => { if (needSession()) togglePicker("answers"); }),
+			command("설정", "settings", "config model depth profile", "설명 깊이, 모델, 미리 설명, 프로필", () => setDraftText("$")),
+			command("새로고침", "refresh", "reload", "목록과 대화를 다시 불러오고 끊긴 설명에 다시 연결", rejoinOrRefresh),
 		];
 		if (state.ask) items.push(
-			{ label: "/바로잡기", aliases: "steer", description: "진행 중인 설명의 방향 고치기", run: toggleSteer },
-			{ label: "/중단", aliases: "stop cancel", description: "진행 중인 설명 멈추기", run: () => void cancelActiveAsk() },
+			command("바로잡기", "steer", "", "진행 중인 설명의 방향 고치기", toggleSteer),
+			command("중단", "stop", "cancel", "진행 중인 설명 멈추기", () => void cancelActiveAsk()),
 		);
-		items.push({ label: "/종료", aliases: "quit exit", description: "터미널만 닫기. 서버와 보낸 설명 요청은 유지", run: exit });
+		items.push(command("종료", "exit", "quit", "터미널만 닫기. 서버와 보낸 설명 요청은 유지", exit));
 		return items;
 	}
 
@@ -715,10 +742,15 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		const [, trigger, raw] = match;
 		const terms = raw.toLowerCase().split(/\s+/).filter(Boolean);
 		const all = trigger === "/" ? commandItems() : trigger === "@" ? sessionItems() : trigger === "#" ? conversationItems() : settingsItems();
-		const items = all.filter((item) => {
+		let items = all.filter((item) => {
 			const haystack = `${item.label} ${item.aliases ?? ""} ${item.description ?? ""}`.toLowerCase();
 			return terms.every((term) => haystack.includes(term));
 		});
+		// 명령은 이름이 입력한 글자로 시작하는 것을 먼저 둔다. "/s" 는 설명에 s 가 든 명령보다 session, settings, stop 이 앞선다.
+		if (trigger === "/" && terms.length) {
+			const starts = (item) => item.names.some((name) => name.toLowerCase().startsWith(terms[0]));
+			items = [...items.filter(starts), ...items.filter((item) => !starts(item))];
+		}
 		if (state.completion.key !== draft.text) {
 			state.completion.key = draft.text;
 			state.completion.index = terms.length ? 0 : Math.max(0, items.findIndex((item) => item.current));

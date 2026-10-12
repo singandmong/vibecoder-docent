@@ -14,9 +14,21 @@ async function terminal(t, baseUrl) {
 	const stdin = new PassThrough();
 	stdin.isTTY = true;
 	stdin.setRawMode = (value) => { stdin.isRaw = value; };
-	let screen = "", frames = 0, closed = false;
+	let screen = "", frames = 0, closed = false, grid = [], patchedRows = null;
+	// 화면 전체를 그리는 프레임과 바뀐 줄만 고치는 프레임을 모두 반영한 가상 화면.
 	const stdout = new Writable({ write(chunk, _encoding, done) {
-		if (String(chunk).includes("\n")) { screen = stripVTControlCharacters(String(chunk)); frames++; }
+		const text = String(chunk);
+		if (text.includes("\u001b[?2026h")) {
+			const body = text.replace(/\u001b\[\?2026[hl]/g, "");
+			if (body.startsWith("\u001b[2J\u001b[H")) { grid = body.slice(7).split("\r\n"); patchedRows = null; }
+			else {
+				const parts = body.split(/\u001b\[(\d+);1H\u001b\[0m\u001b\[2K/);
+				for (let i = 1; i < parts.length; i += 2) grid[Number(parts[i]) - 1] = parts[i + 1];
+				patchedRows = (parts.length - 1) / 2;
+			}
+			screen = stripVTControlCharacters(grid.join("\r\n"));
+			frames++;
+		}
 		done();
 	} });
 	Object.assign(stdout, { isTTY: true, columns: 84, rows: 31 });
@@ -24,7 +36,10 @@ async function terminal(t, baseUrl) {
 	finished.catch(() => {});
 	const ui = {
 		get screen() { return screen; },
+		/** 마지막 프레임이 고친 줄 수. 전체를 다시 그렸으면 null. */
+		get patchedRows() { return patchedRows; },
 		send: (keys) => stdin.write(keys),
+		finished,
 		async key(keys) { const before = frames; stdin.write(keys); await until(() => frames > before); },
 		async resize(columns, rows) { const before = frames; Object.assign(stdout, { columns, rows }); stdout.emit("resize"); await until(() => frames > before); },
 		async close() {
@@ -193,6 +208,18 @@ test("a disconnected explanation rejoins the same request instead of submitting 
 	}
 });
 
+test("typing a letter rewrites only the changed rows, not the whole screen", async (t) => {
+	const f = await fixture(t);
+	const ui = await terminal(t, f.address);
+	await ui.key("가");
+	assert.ok(ui.patchedRows !== null && ui.patchedRows <= 2, `expected a partial update, got ${ui.patchedRows} rows`);
+	assert.match(ui.screen, /가▏/);
+	await ui.key("\u007f");
+	assert.ok(ui.patchedRows !== null && ui.patchedRows <= 2);
+	assert.doesNotMatch(ui.screen, /가▏/);
+	assert.match(ui.screen, /▏궁금한 내용을 입력하세요/);
+});
+
 test("composer letters remain literal and picker cancellation preserves the draft and caret", async (t) => {
 	const f = await fixture(t);
 	const ui = await terminal(t, f.address);
@@ -352,6 +379,19 @@ test("trigger menus switch conversation and settings in place, and never send th
 	await ui.key("\r");
 	await until(async () => (await f.api("/api/profiles")).body.find((profile) => profile.id === "default").defaultDifficulty === "HARD");
 	assert.equal((await f.calls()).filter((call) => call.pid).length, 2, "menus must not call the explanation model");
+});
+
+test("commands show Korean and English names and either name runs the command", async (t) => {
+	const f = await fixture(t);
+	const ui = await terminal(t, f.address);
+	await ui.key("/s");
+	const listed = ui.screen.split(/\r?\n/).filter((line) => /\/\S+ \(\w+\)/.test(line)).map((line) => line.match(/\/(\S+) \((\w+)\)/).slice(1).join(" "));
+	assert.deepEqual(listed.slice(0, 2), ["세션 session", "설정 settings"], ui.screen);
+	await ui.key("\u0015");
+	await ui.key("/exit");
+	assert.match(ui.screen.split(/\r?\n/).find((line) => line.includes("→")) ?? "", /\/종료 \(exit\)/);
+	ui.send("\r");
+	await ui.finished;
 });
 
 test("an unmatched trigger is not sent until Esc turns it into literal question text", async (t) => {
