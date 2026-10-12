@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { httpError } from "./learning.mjs";
+import { httpError } from "./errors.mjs";
 
 const ISOLATION = "memory:\n  backend: off\nautolearn:\n  enabled: false\n";
 const ISOLATION_FLAGS = ["--no-session", "--no-title", "--no-extensions", "--no-skills", "--no-rules", "--no-lsp"];

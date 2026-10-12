@@ -1,6 +1,6 @@
 // 스레드와 질문 대상 (ADR 0022·0028). 스레드 식별자·카드의 질문 대상·앱이 만든 요청문은 서버가 정한다.
 // 사실 근거는 현재 전사다. 과거 문답은 "그거", "두 번째" 같은 말이 무엇을 가리키는지 이해하는 데 쓴다.
-import { httpError } from "./learning.mjs";
+import { httpError } from "./errors.mjs";
 import { threadKey, threadText } from "./store.mjs";
 
 const FOCUS_MAX = 7800;

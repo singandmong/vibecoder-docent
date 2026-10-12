@@ -4,11 +4,12 @@
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { conversationPool } from "./conversation.mjs";
-import { THINKING } from "./depth.mjs";
+import { checkOverride, depthDecider } from "./depth.mjs";
 import { displayOf, parseCards, parseFocus, questionContext, recentDialogue, steerMessage, threadKey, threadRecords } from "./dialogue.mjs";
 import { extractCitations, prepareEvidence } from "./evidence.mjs";
 import { jobRegistry } from "./jobs.mjs";
-import { applyClassification, beginRequest, completeAnswer, explanationHints, httpError, parseDomains, parsePlan, planningContext, planningInput, profile, requestKey, requestSignature, resolveDifficulty, settleRequest, sourceScope, storedRequest } from "./learning.mjs";
+import { httpError } from "./errors.mjs";
+import { applyClassification, beginRequest, completeAnswer, explanationHints, parsePlan, planningContext, planningInput, profile, requestKey, requestSignature, settleRequest, sourceScope, storedRequest } from "./learning.mjs";
 import { selectedModel } from "./models.mjs";
 import { extractTerms, filterTerms } from "./review.mjs";
 import { CancelledError } from "./runner.mjs";
@@ -126,6 +127,7 @@ export function createAsk({ runner, providerOf, prompts, notify }) {
 	const gate = priorityGate();
 	const turns = threadTurns();
 	const sources = new Map();
+	const decideDepth = depthDecider({ runner, prompt: prompts.domains });
 
 	/** 정규화 전사와 근거 표식. 같은 전사면 표식 계산을 다시 하지 않는다. */
 	async function sessionSource(id, provider) {
@@ -170,17 +172,7 @@ export function createAsk({ runner, providerOf, prompts, notify }) {
 			const scope = sourceScope(id, provider.host, source.original);
 			const own = threadRecords(records, focus);
 			const context = { ...(await planningContext(profileId, scope, q, job.meta.auto, focus)), dialogue: recentDialogue(own), cards };
-			// 분야별 깊이를 설정한 프로필만 설명 전에 분야를 짧게 판정한다.
-			let domains = [];
-			if (!difficulty && Object.keys(context.profile.domainDifficulties).length) {
-				job.emit({ type: "stage", stage: "planning" });
-				try {
-					domains = parseDomains(await runner.once({ system: prompts.domains, task: JSON.stringify({ question: q, focus: focus?.label ?? null }), model, signal: job.signal }));
-				} catch (error) {
-					if (model || error.cancelled) throw error;
-				}
-			}
-			const depth = resolveDifficulty(context.profile, domains, difficulty);
+			const { thinking, ...depth } = await decideDepth({ profile: context.profile, override: difficulty, question: q, focus, model, signal: job.signal, onJudging: () => job.emit({ type: "stage", stage: "planning" }) });
 			job.emit({ type: "stage", stage: "explaining" });
 			// 분야 판정 중에 들어온 바로잡기는 질문에 합쳐서 설명을 시작한다.
 			const early = job.steers.map((message) => `\n(바로잡기) ${message}`).join("");
@@ -191,7 +183,7 @@ export function createAsk({ runner, providerOf, prompts, notify }) {
 				records: own,
 				instructions: `${explanationHints(context, depth)}\n${questionContext(focus)}`,
 				question: `${q}${early}`,
-				thinking: THINKING[depth.difficulty],
+				thinking,
 				signal: job.signal,
 				onDelta: (text) => job.emit({ type: "delta", text }),
 				onRestart: () => job.emit({ type: "reset" }),
@@ -244,7 +236,7 @@ export function createAsk({ runner, providerOf, prompts, notify }) {
 			const focus = parseFocus(input.focus);
 			const cards = parseCards(input.cards);
 			const current = await profile(profileId);
-			resolveDifficulty(current, [], difficulty);
+			checkOverride(difficulty);
 			const q = question.trim();
 			const auto = Boolean(input.auto);
 			const key = requestKey(profileId, requestId);

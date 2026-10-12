@@ -36,9 +36,6 @@ test("learning preserves profile isolation, explicit feedback, repeat and retry 
 		const bob = await learning.createProfile("Bob");
 		await learning.updateProfile(alice.id, { defaultDifficulty: "NORMAL", domainDifficulties: { frontend: "HARD" } });
 		const context = await learning.planningContext(alice.id, source, "왜 막아?", false);
-		assert.equal(learning.resolveDifficulty(context.profile, ["frontend"]).difficulty, "HARD");
-		assert.equal(learning.resolveDifficulty(context.profile, ["frontend"], "EASY").difficulty, "EASY");
-		assert.equal(learning.resolveDifficulty({ defaultDifficulty: "HARD", domainDifficulties: { frontend: "EASY" } }, ["frontend"]).difficulty, "HARD");
 		const plan = classify(context);
 		const titled = (title) => learning.parsePlan(JSON.stringify({ kind: "why", domains: [], concepts: [], keywords: [], title }), context).title;
 		assert.equal(titled("  로그인 방식 선택 "), "로그인 방식 선택");

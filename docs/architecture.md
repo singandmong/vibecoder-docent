@@ -5,7 +5,8 @@ prompt/docent.md          코어. 호스트 중립 프롬프트. 유일한 진�
 app/server.mjs            로컬 웹앱 서버. 세션 목록·정규화 전사 캐시·HTTP 경로. 설명 요청은 ask.mjs 에 맡기고 NDJSON 스트림/JSON으로 응답
 app/ask.mjs               설명 요청 module: 작업 열기·합류·재생, 사용자 질문 우선 게이트, 같은 스레드 순서 실행, 설명 → 근거 → 저장 → 뒤에서 학습 분류. runner 를 받아 쓴다 (ADR 0050)
 app/runner.mjs            omp 실행 정책 한곳: 사용자 전역 설정 격리, 한 번 호출(-p)과 RPC 대화, 중단·바로잡기 (ADR 0028)
-app/depth.mjs             설명 깊이 → thinking 수준 표. 서버 실행과 터미널 상태줄이 함께 씀 (ADR 0028·0040)
+app/depth.mjs             설명 깊이 module: 고른 깊이 > 분야 판정(분야별 설정이 있을 때만) > 기본값, 판정 실패 규칙, thinking 표. 터미널 상태줄도 같은 표를 씀 (ADR 0028·0040·0051)
+app/errors.mjs            화면에 보여 줄 오류(httpError)
 app/conversation.mjs      스레드 = 살아 있는 RPC 대화. 전사는 처음 한 번 + 이후 새 기록만, 닫힌 스레드는 저장된 문답으로 복원 (ADR 0028)
 app/jobs.mjs              설명 작업 레지스트리: 대기·분류·설명·완료·실패·중단, 같은 requestId 합류, 스트림 이벤트 (ADR 0029)
 app/prefetch.mjs          세션 감시기 공유·미리 설명 예약·10분 5개 상한 (ADR 0031)
