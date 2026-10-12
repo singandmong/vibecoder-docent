@@ -9,6 +9,7 @@ import { createServer, request } from "node:http";
 import { once } from "node:events";
 import { stripVTControlCharacters } from "node:util";
 import { createTerminalTheme } from "../app/terminal-theme.mjs";
+import { answerFocus } from "../app/conversations.mjs";
 
 async function terminal(t, baseUrl) {
 	const stdin = new PassThrough();
@@ -343,6 +344,22 @@ test("the whole-session conversation's answer picker excludes answers from card 
 	await until(async () => (await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body.length === 3);
 	const row = (await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body.find((entry) => entry.question === "선택한 전체 대화에 이어 묻기");
 	assert.equal(row.thread, "");
+});
+
+test("the whole-session conversation shows its re-explained answer and lists no separate saved conversation for it", async (t) => {
+	const f = await fixture(t);
+	await f.ask("whole", "default", { question: "전체 대상 질문" });
+	const [first] = (await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body;
+	await f.ask("again", "default", { question: "다른 방식으로 다시 설명해줘", focus: answerFocus(first.answer) });
+	const ui = await terminal(t, f.address);
+	await ui.key("\u000f");
+	assert.ok(ui.screen.includes("전체 대상 질문"), ui.screen);
+	assert.ok(ui.screen.includes("다른 방식으로 다시 설명해줘"), ui.screen);
+	await ui.key("\u001b");
+	await ui.key("\u0014");
+	assert.ok(ui.screen.includes("대화 선택"), ui.screen);
+	assert.ok(ui.screen.includes("저장 0"), ui.screen);
+	assert.equal(ui.screen.includes("저장 대화"), false, ui.screen);
 });
 
 test("cancelling does not overwrite a newer unsent composer draft", async (t) => {

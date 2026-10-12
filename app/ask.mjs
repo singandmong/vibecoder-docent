@@ -5,7 +5,8 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { conversationPool } from "./conversation.mjs";
 import { checkOverride, depthDecider } from "./depth.mjs";
-import { displayOf, parseCards, parseFocus, questionContext, recentDialogue, steerMessage, threadRecords } from "./dialogue.mjs";
+import { displayOf, parseCards, parseFocus, questionContext, recentDialogue, steerMessage } from "./dialogue.mjs";
+import { threadRows } from "./conversations.mjs";
 import { extractCitations, prepareEvidence } from "./evidence.mjs";
 import { jobRegistry } from "./jobs.mjs";
 import { httpError } from "./errors.mjs";
@@ -15,7 +16,7 @@ import { extractTerms, filterTerms } from "./review.mjs";
 import { CancelledError } from "./runner.mjs";
 import { parseAnswer } from "./slots.mjs";
 import { beginRequest, completeAnswer, history, requestKey, requestSignature, settleRequest, storedRequest } from "./store.mjs";
-import { threadKey } from "./thread.mjs";
+import { threadOf } from "./thread.mjs";
 
 const MANUAL_GRACE_MS = 1500;
 const SOURCE_CACHE = 8;
@@ -171,7 +172,7 @@ export function createAsk({ runner, providerOf, prompts, notify }) {
 			const provider = providerOf(id);
 			const [source, records] = await Promise.all([sessionSource(id, provider), history(id, profileId)]);
 			const scope = sourceScope(id, provider.host, source.original);
-			const own = threadRecords(records, focus);
+			const own = threadRows(records, thread);
 			const context = { ...(await planningContext(profileId, scope, q, job.meta.auto, focus)), dialogue: recentDialogue(own), cards };
 			const { thinking, ...depth } = await decideDepth({ profile: context.profile, override: difficulty, question: q, focus, model, signal: job.signal, onJudging: () => job.emit({ type: "stage", stage: "planning" }) });
 			job.emit({ type: "stage", stage: "explaining" });
@@ -252,9 +253,10 @@ export function createAsk({ runner, providerOf, prompts, notify }) {
 			// 완료된 요청은 이후 모델 설정·카탈로그와 무관하게 저장된 답을 돌려준다.
 			const stored = await storedRequest(profileId, requestId, signature);
 			if (stored) return stored;
+			// 스레드는 저장된 문답에서 정한다. 다시 설명한 답은 원래 답의 스레드에 남는다 (ADR 0053).
+			const thread = focus ? threadOf(id, focus, await history(id, profileId)) : "";
 			const again = join();
 			if (again) return again;
-			const thread = threadKey(focus?.text);
 			return jobs.start({
 				key,
 				signature,

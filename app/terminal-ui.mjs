@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { cardsPayload, conversationList, threadRows } from "./conversations.mjs";
 import { TerminalClient } from "./terminal-client.mjs";
 import { TerminalInput, graphemes, terminalSafeText, wrapTerminalText } from "./terminal-input.mjs";
 import { createTerminalTheme } from "./terminal-theme.mjs";
@@ -12,11 +13,6 @@ const TITLE = "바이브코더 도슨트";
 const CATEGORY = { question: "질문", result: "작업 결과", plan: "계획" };
 const profileName = (profile) => profile?.name || profile?.id || "기본 프로필";
 const selectedProfileId = (profile) => profile?.id || "default";
-const normalizedThreadText = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
-const threadKey = (text) => {
-	const normalized = normalizedThreadText(text);
-	return normalized ? createHash("sha256").update(normalized).digest("hex").slice(0, 16) : "";
-};
 /** 작업 폴더 이름. 워크트리처럼 저장소 이름과 다르면 "저장소/폴더" 로 보여 준다. */
 const placeOf = (session) => (session.repo && session.project && session.repo !== session.project ? `${session.repo}/${session.project}` : session.project || session.repo || "");
 /** 세션 카드 아이콘. DOCENT_SYMBOLS=ascii 또는 TERM=dumb 에서는 ASCII (ADR 0045). */
@@ -36,23 +32,6 @@ export function agoLabel(value, now = Date.now()) {
 	if (minutes < 7 * 24 * 60) return `${Math.floor(minutes / (24 * 60))}일 전`;
 	const date = new Date(time);
 	return `${date.getMonth() + 1}월 ${date.getDate()}일`;
-}
-
-function focusForEvent(event) {
-	const options = Array.isArray(event.options) ? event.options.map((option) => `${option.label ?? ""}${option.description ? ` — ${option.description}` : ""}`).join("\n") : "";
-	const source = String(event.text ?? "").trim();
-	let text = `${source}${options ? `\n\n선택지:\n${options}` : ""}`;
-	if (text.length > 7800) {
-		const marker = "\n\n[중간 생략 — 전체 내용은 세션 전사에서 확인]\n\n";
-		const half = Math.floor((7800 - 48) / 2);
-		text = `${text.slice(0, half)}${marker}${text.slice(-half)}`;
-	}
-	const lines = String(event.text ?? "").split("\n").map((line) => line.replace(/^\s*(?:[#>*+-]+\s*|\d+[.)]\s+)*/, "").replace(/[*_`]/g, "").replace(/^\s*[✅⏳⛔]\s*/u, "").trim()).filter(Boolean);
-	const heading = lines.find((line) => line.length > 8) || lines[0] || "";
-	const derived = heading.length > 100 ? `${heading.slice(0, 100)}…` : heading;
-	const label = typeof event.focus?.label === "string" && event.focus.label.trim() ? event.focus.label : derived || CATEGORY[event.sub];
-	const focusText = typeof event.focus?.text === "string" && event.focus.text.trim() ? event.focus.text : text;
-	return { label: label.slice(0, 200), text: focusText };
 }
 
 function dateLabel(value) {
@@ -81,10 +60,6 @@ function moveVertical(draft, cursor, delta, preferredColumn) {
 	let offset = 0;
 	for (let i = 0; i < targetLine; i++) offset += graphemes(lines[i]).length + 1;
 	return { cursor: offset + Math.min(targetColumn, graphemes(lines[targetLine]).length), preferredColumn: targetColumn };
-}
-
-function focusThread(focus) {
-	return focus?.text ? threadKey(focus.text) : "";
 }
 
 function requestStatus(event) {
@@ -173,7 +148,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	};
 
 	function displayedHistory() {
-		return state.history.filter((row) => (row.thread || "") === state.thread);
+		return threadRows(state.history, state.thread);
 	}
 
 	function sameAskContext() {
@@ -204,47 +179,14 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		return state.purpose === "steer" ? 2000 : 8000;
 	}
 
-	// --- Conversation choices: session whole + live cards + saved-only threads, deterministic. ---
+	// --- Conversation choices: session whole + live cards + saved-only threads (conversations.mjs). ---
 	function conversationOptions() {
-		const options = [{
-			kind: "all", thread: "", focus: null, card: null,
-			label: "세션 전체 대화",
-			meta: `세션 전체 대화의 문답 ${state.history.filter((row) => !row.thread).length}개`,
-		}];
-		const seen = new Set([""]);
-		for (const card of state.cards) {
-			const thread = card.thread || focusThread(card.focus);
-			if (!thread || seen.has(thread)) continue;
-			seen.add(thread);
-			const saved = state.history.filter((row) => row.thread === thread).length;
-			options.push({
-				kind: "card", thread, focus: { label: card.focus.label, text: card.focus.text }, card,
-				label: card.focus.label,
-				meta: `${card.past ? "이전 기록" : "새 기록"} | ${dateLabel(card.ts || card.at)}${saved ? ` | 저장된 문답 ${saved}개` : " | 저장된 문답 없음"}`,
-			});
-		}
-		const byThread = new Map();
-		for (const row of state.history) {
-			if (!row.thread || seen.has(row.thread)) continue;
-			let entry = byThread.get(row.thread);
-			if (!entry) { entry = { thread: row.thread, rows: [] }; byThread.set(row.thread, entry); }
-			entry.rows.push(row);
-		}
-		const saved = [...byThread.values()].sort((a, b) => {
-			const at = String(a.rows.at(-1)?.ts ?? ""), bt = String(b.rows.at(-1)?.ts ?? "");
-			return bt.localeCompare(at) || a.thread.localeCompare(b.thread);
-		});
-		for (const entry of saved) {
-			const last = entry.rows.at(-1);
-			options.push({
-				kind: "saved", thread: entry.thread,
-				focus: last?.focus?.text ? { label: last.focus.label || "질문 대상", text: last.focus.text } : null,
-				card: null,
-				label: last?.focus?.label || "주제 없는 저장 대화",
-				meta: `마지막 활동 ${dateLabel(last?.ts)} | 저장된 문답 ${entry.rows.length}개`,
-			});
-		}
-		return options;
+		return conversationList(state.history, state.cards).map((option) => ({
+			...option,
+			meta: option.kind === "all" ? `세션 전체 대화의 문답 ${option.count}개`
+				: option.kind === "card" ? `${option.card.past ? "이전 기록" : "새 기록"} | ${dateLabel(option.card.ts || option.card.at)}${option.count ? ` | 저장된 문답 ${option.count}개` : " | 저장된 문답 없음"}`
+				: `마지막 활동 ${dateLabel(option.lastTs)} | 저장된 문답 ${option.count}개`,
+		}));
 	}
 
 	// --- Body renderers. ---
@@ -840,14 +782,14 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		}
 	}
 
+	/** 서버가 질문 대상과 스레드를 붙인 사건 카드만 받는다. 클라이언트는 스레드를 계산하지 않는다. */
 	function addCard(event) {
 		if (!event || !["question", "assistant"].includes(event.kind) || !CATEGORY[event.sub] || typeof event.text !== "string" || !event.text.trim()) return;
-		const focus = focusForEvent(event);
-		const thread = typeof event.thread === "string" && event.thread ? event.thread : focusThread(focus);
-		const key = thread || `${event.sub}\n${normalizedThreadText(event.text)}`;
+		if (typeof event.thread !== "string" || !event.thread || typeof event.focus?.text !== "string" || !event.focus.text.trim()) return;
+		const thread = event.thread, key = thread;
 		if (state.cardKeys.has(key)) return;
 		state.cardKeys.add(key);
-		state.cards.push({ ...event, focus, thread, key });
+		state.cards.push({ ...event, focus: { label: event.focus.label || CATEGORY[event.sub], text: event.focus.text }, thread, key });
 		if (state.cards.length > 200) {
 			const removed = state.cards.shift();
 			state.cardKeys.delete(removed.key);
@@ -911,7 +853,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			const focus = job.focus?.text ? { label: String(job.focus.label || "질문 대상").slice(0, 200), text: job.focus.text } : null;
 			const ask = {
 				requestId: job.requestId, sessionId: session.id, profileId: selectedProfileId(profile), question: job.question,
-				focus, text: "", stage: requestStatus({ type: "stage", stage: job.stage }), steers: [], cancelling: false, startedAt: Date.parse(job.startedAt ?? "") || Date.now(),
+				focus, thread: typeof job.thread === "string" ? job.thread : "", text: "", stage: requestStatus({ type: "stage", stage: job.stage }), steers: [], cancelling: false, startedAt: Date.parse(job.startedAt ?? "") || Date.now(),
 			};
 			const body = { id: session.id, profileId: ask.profileId, question: ask.question, requestId: ask.requestId };
 			if (focus) body.focus = focus;
@@ -1083,7 +1025,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		const requestId = randomUUID();
 		const ask = {
 			requestId, sessionId: session.id, profileId: selectedProfileId(profile), question: text,
-			focus, text: "", stage: "요청을 보내는 중이에요", steers: [], cancelling: false, startedAt: Date.now(),
+			focus, thread: state.thread, text: "", stage: "요청을 보내는 중이에요", steers: [], cancelling: false, startedAt: Date.now(),
 		};
 		state.ask = ask;
 		inform("");
@@ -1094,7 +1036,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		state.followBottom = true;
 		const body = { id: session.id, profileId: ask.profileId, question: text, requestId };
 		if (focus) body.focus = focus;
-		body.cards = state.cards.slice(-40).filter((card) => /^[a-f0-9]{16}$/.test(card.thread)).map((card) => ({ thread: card.thread, label: String(card.displayTitle || card.focus.label).slice(0, 200) }));
+		body.cards = cardsPayload(state.cards.map((card) => ({ thread: card.thread, label: card.displayTitle || card.focus.label })));
 		void consumeAsk(ask, body);
 	}
 
@@ -1104,7 +1046,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		if (state.purpose === "steer") state.purpose = "ask";
 		if (state.session?.id === ask.sessionId && selectedProfileId(state.profile) === ask.profileId) {
 			state.focus = ask.focus;
-			state.thread = focusThread(ask.focus);
+			state.thread = ask.thread;
 			state.picker = null;
 			state.selectedAnswer = null;
 			state.bodyScroll = 0;

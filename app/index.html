@@ -614,6 +614,7 @@
 <script type="module">
 import { mountMarkdown, unmountMarkdown } from "/assets/docent-markdown.js";
 import { mobileView } from "/mobile.mjs";
+import { answerFocus, blockTitle, cardsPayload, conversationList, excerpt, inThread } from "/conversations.mjs";
 const $ = (s) => document.querySelector(s);
 $("#settingsBtn").onclick = () => {
   $("#settings").showModal();
@@ -629,7 +630,6 @@ const EXPLAIN_ACTIONS = [
 ];
 const DOMAINS = { frontend: "프론트엔드", backend: "백엔드", server: "서버", database: "데이터베이스", design: "디자인", service: "서비스", other: "기타" };
 const THEMES = ["auto", "dark", "light"];
-const normalizeQuestion = (q) => q.replace(/\s+/g, " ").trim();
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const button = (text, action, cls = "control") => { const b = el("button", cls, text); b.type = "button"; b.onclick = action; return b; };
 const saved = (key) => { try { return localStorage.getItem(`docent.${key}`); } catch { return null; } };
@@ -644,11 +644,10 @@ let prefetchInfo = null, prefetchFailed = false;
 const autoJobs = new Map(), pendingQueue = [], manualJobs = [], eventCards = new Map();
 const state = { draft: "", busy: false, latest: null, focus: null, status: "" };
 // 작업 내용 카드마다 대화가 따로 이어진다. 스레드 키는 서버가 정한 문자열, 빈 문자열은 세션 전체 대화.
+// 문답의 소속은 서버가 붙인 thread 로만 정한다(conversations.mjs의 inThread). 카드가 목록에 없는 저장 대화는 세션 전체 대화 위에 따로 보인다.
 let threadRecords = [], chatOpen = false;
 const favoriteThreads = new Set(), cardByThread = new Map();
 const currentThread = () => state.focus?.thread ?? "";
-/** 카드 스레드는 같은 대상의 문답만, 세션 전체 대화는 어느 카드에도 속하지 않은 문답을 모은다. */
-const inThread = (record, key) => { const own = record.thread ?? ""; return key ? own === key : !own || !cardByThread.has(own); };
 let activeAsk = null, pipWindow = null, pipUI = null, pipOpening = false, pipListeners = null;
 let evidenceOpener = null;
 let termDialog = null;
@@ -783,7 +782,7 @@ function syncComposer() {
   $("#steer").hidden = !(state.busy && state.draft.trim());
   $("#askStatus").textContent = state.status;
   // 카드 대화는 맨 위 AI 출력 메시지가 제목 역할을 한다. 머리줄에는 같은 문장을 다시 쓰지 않는다.
-  $("#chatTitle").textContent = state.focus?.card ? "대화" : "세션 전체 대화";
+  $("#chatTitle").textContent = state.focus ? "대화" : "세션 전체 대화";
   setStar($("#threadStar"), favoriteThreads.has(currentThread()));
   syncActionChips(); renderAutoStatus(); renderQueue(); renderDraftNotice();
   for (const doc of [document, pipWindow?.document].filter(Boolean)) doc.querySelectorAll(".event-ask").forEach((b) => b.disabled = !current || state.busy || historyLoading);
@@ -797,21 +796,9 @@ function setFocus(focus) {
   syncComposer();
 }
 
-function excerpt(value, max = 6000) {
-  const text = String(value ?? "");
-  if (text.length <= max) return text;
-  const half = Math.floor((max - 48) / 2);
-  return `${text.slice(0, half)}\n\n[중간 생략, 전체 내용은 세션 전사에서 확인]\n\n${text.slice(-half)}`;
-}
-
-function answerTarget(answer) {
-  return { label: blockTitle(answer.headline) || "최근 설명", text: [answer.headline, answer.explain, ...(answer.details ?? [])].filter(Boolean).join("\n\n"), card: null, thread: answer.thread ?? "" };
-}
-
-
-/** 질문 대상이 있으면 그것을, 없으면 가장 최근 설명을 다시 설명한다. */
+/** 질문 대상이 있으면 그것을, 없으면 가장 최근 설명을 다시 설명한다. 세션 전체 대화에서 다시 설명한 답은 세션 전체 대화에 남는다 (ADR 0022·0053). */
 function explainTarget() {
-  return state.focus ?? (state.latest ? answerTarget(state.latest) : null);
+  return state.focus ?? (state.latest ? { ...answerFocus(state.latest), card: null, thread: "" } : null);
 }
 
 function createActionChips(container) {
@@ -842,7 +829,7 @@ function markdown(text, c = capture(), answer = {}, cls = "", used = new Set()) 
   for (const term of terms) if (lower.includes(term.term.toLowerCase())) used.add(term.term.toLowerCase());
   mountMarkdown(box, text, {
     terms,
-    onTerm: (term, opener) => openTerm(term, answerTarget(answer).text || String(text), c, opener),
+    onTerm: (term, opener) => openTerm(term, answerFocus(answer).text || String(text), c, opener),
   });
   return box;
 }
@@ -859,7 +846,8 @@ function openTerm(term, contextText, c, opener) {
   const request = button("이 맥락에서 풀이 요청", () => {
     if (!isCurrent(c) || state.busy || historyLoading) return;
     dialog.close();
-    ask(`"${excerpt(term.term, 200)}"이라는 용어가 이 내용에서 어떤 뜻이고 왜 필요한지 쉬운 말로 설명해줘.`, { difficulty: "EASY", displayQuestion: `용어 풀이: ${excerpt(term.term, 200)}` });
+    const name = term.term.length > 200 ? `${term.term.slice(0, 200)}…` : term.term;
+    ask(`"${name}"이라는 용어가 이 내용에서 어떤 뜻이고 왜 필요한지 쉬운 말로 설명해줘.`, { difficulty: "EASY", displayQuestion: `용어 풀이: ${name}` });
   }, "control event-ask");
   request.disabled = state.busy || historyLoading;
   actions.append(request, button("내 용어 사전 열기", () => {
@@ -883,7 +871,7 @@ function chooseTerm(answer, c, opener) {
   termDialog?.close();
   const dialog = doc.createElement("dialog"); dialog.id = "termDialog"; dialog.setAttribute("aria-labelledby", "termTitle");
   const title = el("h2", null, "어떤 용어가 궁금하세요?"); title.id = "termTitle";
-  const context = answerTarget(answer).text;
+  const context = answerFocus(answer).text;
   dialog.append(title, el("p", "notice", "설명 속 단어를 선택하거나 직접 적어 주세요. 저장된 뜻을 먼저 보여 주고, 새 풀이 요청은 따로 확인해요."));
   const candidates = [...new Map([...(answer.keywords ?? answer.learning?.keywords ?? []), ...glossary.filter((entry) => context.toLowerCase().includes(entry.term.toLowerCase()))].map((entry) => [entry.term.toLowerCase(), entry])).values()].slice(0, 8);
   const choices = el("div", "card-actions");
@@ -1392,7 +1380,7 @@ async function toggleFavorite(focus) {
   if (!c.sessionId) return;
   on ? favoriteThreads.add(key) : favoriteThreads.delete(key); syncFavorites();
   try {
-    await api("/api/favorites", "POST", { profileId: c.profileId, id: c.sessionId, favorite: on, focus: focus ? { label: focus.label.slice(0, 200), text: excerpt(focus.text, 7800) } : null });
+    await api("/api/favorites", "POST", { profileId: c.profileId, id: c.sessionId, favorite: on, focus: focus ? { label: focus.label.slice(0, 200), text: excerpt(focus.text) } : null });
   } catch (e) {
     if (!isCurrent(c)) return;
     on ? favoriteThreads.delete(key) : favoriteThreads.add(key); syncFavorites();
@@ -1467,10 +1455,20 @@ function renderThread({ top = false } = {}) {
   clearSurface(log);
   const source = threadSource(key, c);
   if (source) log.append(source);
+  if (!key) {
+    // 카드가 작업 내용에 없는 저장 대화는 세션 전체 대화에 섞지 않고 바로가기로 둔다 (ADR 0038 §5, 0053).
+    const saved = conversationList(threadRecords, [...eventCards.values()]).filter((option) => option.kind === "saved");
+    if (saved.length) {
+      const box = el("div", "card-actions");
+      box.append(el("div", "notice", "작업 내용에 없는 카드의 저장 대화"));
+      for (const option of saved) box.append(button(`${option.label} (문답 ${option.count}개)`, () => { if (isCurrent(c)) openThread(cardByThread.get(option.thread)?.focus ?? { ...option.focus, card: null, thread: option.thread }); }));
+      log.append(box);
+    }
+  }
   const base = log.childElementCount;
   const rows = threadRecords.filter((record) => inThread(record, key));
   for (const r of rows) {
-    log.append(questionNode(r.display || displayOf(r.question), key ? null : r.focus));
+    log.append(questionNode(r.display || displayOf(r.question), source ? null : r.focus));
     if (r.steers?.length) {
       const lines = el("div", "steer-lines");
       for (const message of r.steers) lines.append(el("div", "steer-line", `바로잡기: ${message}`));
@@ -1510,12 +1508,6 @@ function displayOf(question) {
   const text = String(question ?? ""), first = text.split("\n")[0].trim();
   const label = ACTION_LABEL.get(text) ?? ACTION_LABEL.get(first) ?? first;
   return label.length > 240 ? `${label.slice(0, 240)}…` : label;
-}
-
-function blockTitle(text) {
-  const lines = String(text ?? "").split("\n").map((line) => line.replace(/^\s*(?:[#>*+-]+\s*|\d+[.)]\s+)*/, "").replace(/[*_`]/g, "").replace(/^\s*[✅⏳⛔]\s*/u, "").trim()).filter(Boolean);
-  const line = lines.find((line) => line.length > 8) || lines[0] || "";
-  return line.length > 100 ? `${line.slice(0, 100)}…` : line;
 }
 
 /** 사용자가 읽던 위치를 지킨다. 맨 아래를 보고 있을 때만 따라 내려간다. */
@@ -1664,13 +1656,13 @@ function renderEvent(ev) {
   }
   if (!["question", "assistant"].includes(ev.kind) || !Object.hasOwn(EVENT_LABEL, ev.sub) || typeof ev.text !== "string" || !ev.text.trim()) return;
   const c = capture();
-  const options = Array.isArray(ev.options) ? ev.options.map((o) => `${o.label ?? ""}${o.description ? ` — ${o.description}` : ""}`).join("\n") : "";
-  const focus = ev.focus?.text ? { label: ev.focus.label || blockTitle(ev.text) || EVENT_LABEL[ev.sub], text: ev.focus.text } : { label: blockTitle(ev.text) || EVENT_LABEL[ev.sub], text: `${ev.text.trim()}${options ? `\n\n선택지:\n${options}` : ""}` };
-  const thread = ev.thread ?? "";
-  const key = thread || `${ev.sub}\n${normalizeQuestion(ev.text)}`;
+  // 질문 대상과 스레드는 서버가 붙인다(prefetch.mjs). 화면은 계산하지 않고, 붙지 않은 사건은 카드로 만들지 않는다.
+  if (typeof ev.thread !== "string" || !ev.thread || typeof ev.focus?.text !== "string" || !ev.focus.text.trim()) return;
+  const thread = ev.thread, key = thread;
   if (eventCards.has(key)) return;
   const card = el("article", `ev ${ev.kind}${ev.past ? " past" : ""}`); card.dataset.eventType = ev.sub;
-  focus.card = card; focus.thread = thread; card.focus = focus; card.thread = thread;
+  const focus = { label: ev.focus.label || EVENT_LABEL[ev.sub], text: ev.focus.text, card, thread };
+  card.focus = focus; card.thread = thread;
   card.source = { text: ev.text, options: Array.isArray(ev.options) ? ev.options : [] };
   const heading = el("div", "event-heading"); heading.append(catChip(ev.sub));
   if (!ev.past) {
@@ -1686,8 +1678,8 @@ function renderEvent(ev) {
   // 원문은 카드를 눌렀을 때 대화 맨 위 메시지로 보인다. 카드에는 제목과 요약만 둔다.
   const star = button("", () => toggleFavorite(card.focus), "icon-btn small star card-star"); star.innerHTML = STAR_SVG;
   card.append(heading, title, el("p", "event-summary"), status, star);
-  eventCards.set(key, card); if (thread) cardByThread.set(thread, card); toFlow(card); syncFavorites();
-  if (thread && pastByThread.has(thread)) attachCardAnswer(card, pastByThread.get(thread));
+  eventCards.set(key, card); cardByThread.set(thread, card); toFlow(card); syncFavorites();
+  if (pastByThread.has(thread)) attachCardAnswer(card, pastByThread.get(thread));
   else if (ev.ask) attachAuto(card, ev.ask);
   else if (AUTO_STATE[ev.autoState]) eventState(card, ...AUTO_STATE[ev.autoState]);
   else if (ev.past) eventState(card, "", "past");
@@ -1985,7 +1977,7 @@ async function runJob(job) {
     syncAutoCard(job);
   } else {
     if (!job.nodes) {
-      const question = questionNode(job.displayQuestion || job.question, job.thread ? null : job.focus);
+      const question = questionNode(job.displayQuestion || job.question, cardByThread.get(job.thread)?.source ? null : job.focus);
       const steerBox = el("div", "steer-lines"), bubble = el("div", "a pending-answer");
       job.steerBox = steerBox; job.bubble = bubble; job.nodes = [question, steerBox, bubble];
       fillBubble(job, bubble);
@@ -1993,12 +1985,12 @@ async function runJob(job) {
     if (visible() && !job.bubble.isConnected) toLog(job.nodes, true);
   }
   syncComposer();
-  const focus = job.focus ? { label: String(job.focus.label ?? "").slice(0, 200), text: excerpt(job.focus.text, 7800) } : null;
+  const focus = job.focus ? { label: String(job.focus.label ?? "").slice(0, 200), text: excerpt(job.focus.text) } : null;
   const body = { id: job.context.sessionId, profileId: job.context.profileId, question: job.question, requestId: job.requestId };
   if (job.auto) body.auto = true;
   if (focus) body.focus = focus;
   if (job.difficulty) body.difficulty = job.difficulty;
-  if (!job.auto && !job.detached && !job.reattached) body.cards = [...eventCards.values()].slice(-40).map((card) => ({ thread: card.thread ?? "", label: card.displayTitle ?? card.focus.label }));
+  if (!job.auto && !job.detached && !job.reattached) body.cards = cardsPayload([...eventCards.values()].map((card) => ({ thread: card.thread, label: card.displayTitle ?? card.focus.label })));
   let outcome = null;
   try {
     const res = await fetch("/api/ask", { method: "POST", headers: { "content-type": "application/json", accept: "application/x-ndjson" }, body: JSON.stringify(body), signal: job.abort.signal });
@@ -2051,7 +2043,7 @@ function finishJob(job, outcome) {
       job.nodes = null;
       if (job.bubble?.isConnected) job.bubble.replaceWith(renderAnswer(r, job.context));
     }
-    const record = { question: job.question, display: job.displayQuestion || undefined, focus: job.focus ? { label: String(job.focus.label ?? "").slice(0, 200), text: excerpt(job.focus.text, 7800) } : null, answer: r, auto: job.auto, thread: r.thread ?? job.thread, steers: job.steerLines?.size ? [...job.steerLines] : undefined, ts: new Date().toISOString() };
+    const record = { question: job.question, display: job.displayQuestion || undefined, focus: job.focus ? { label: String(job.focus.label ?? "").slice(0, 200), text: excerpt(job.focus.text) } : null, answer: r, auto: job.auto, thread: r.thread ?? job.thread, steers: job.steerLines?.size ? [...job.steerLines] : undefined, ts: new Date().toISOString() };
     threadRecords.push(record);
     if (record.thread) pastByThread.set(record.thread, r);
     if (chatOpen && inThread(record, currentThread())) {
@@ -2225,7 +2217,7 @@ function syncPip() {
   const sendLabel = state.busy ? "설명 중단" : "묻기";
   ui.send.setAttribute("aria-label", sendLabel); ui.send.title = sendLabel;
   ui.steer.hidden = !(state.busy && state.draft.trim());
-  ui.chatTitle.textContent = chatOpen && !state.focus?.card ? "세션 전체 대화" : "대화";
+  ui.chatTitle.textContent = chatOpen && !state.focus ? "세션 전체 대화" : "대화";
   ui.chatClose.hidden = !chatOpen;
   // 작업 내용(미니): 최신이 위. 카드 제목·즐겨찾기·선택이 바뀌면 다시 그린다.
   const cards = [...eventCards.values()].reverse(), selected = state.focus?.card ?? null;
@@ -2260,7 +2252,7 @@ function syncPip() {
   if (source) ui.log.append(source);
   const base = ui.log.childElementCount;
   for (const r of rows) {
-    ui.log.append(questionNode(r.display || displayOf(r.question), key ? null : r.focus));
+    ui.log.append(questionNode(r.display || displayOf(r.question), cardByThread.get(key)?.source ? null : r.focus));
     if (r.steers?.length) {
       const lines = el("div", "steer-lines");
       for (const message of r.steers) lines.append(el("div", "steer-line", `바로잡기: ${message}`));

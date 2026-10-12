@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { httpError } from "./errors.mjs";
-import { threadKey, threadText } from "./thread.mjs";
+import { threadKey, threadText, withThreads } from "./thread.mjs";
 
 export const DOCENT_HOME = process.env.DOCENT_HOME ?? join(homedir(), ".docent");
 const LEGACY_FILE = join(DOCENT_HOME, "questions.jsonl");
@@ -134,7 +134,7 @@ export async function history(sessionId, profileId = "default") {
 			}
 		}
 	}
-	return rows.map((row) => ({ ...row, thread: threadKey(row.focus?.text) })).sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+	return withThreads(rows.sort((a, b) => String(a.ts).localeCompare(String(b.ts))));
 }
 
 /** 용어 추출 결과를 저장한다. 새 문답은 레코드에, 옛 questions.jsonl 줄은 원본을 고치지 않고 따로 보관한다. */

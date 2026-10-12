@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { focusOfEvent, parseCards, parseFocus, recentDialogue, threadRecords } from "../app/dialogue.mjs";
+import { focusOfEvent, parseCards, parseFocus, recentDialogue } from "../app/dialogue.mjs";
 import { threadKey } from "../app/thread.mjs";
 
 const record = (n, extra = {}) => ({ question: `질문 ${n}`, answer: { headline: `결론 ${n}`, explain: `설명 ${n}` }, ...extra });
@@ -33,11 +33,4 @@ test("a malformed focus is rejected instead of silently asking about the whole s
 		assert.throws(() => parseFocus(invalid), { status: 400 });
 	}
 	assert.equal(parseFocus(undefined), null);
-});
-
-test("each card keeps its own conversation; whitespace differences stay in the same thread", () => {
-	const card = { label: "로그인", text: "이메일과  소셜 중\n선택" };
-	const records = [record("세션"), record("카드", { focus: { label: "로그인", text: "이메일과 소셜 중 선택" } }), record("다른 카드", { focus: { label: "배포", text: "배포 결과" } })];
-	assert.deepEqual(threadRecords(records, card).map((r) => r.question), ["질문 카드"]);
-	assert.deepEqual(threadRecords(records, null).map((r) => r.question), ["질문 세션"]);
 });

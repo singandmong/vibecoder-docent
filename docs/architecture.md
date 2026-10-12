@@ -10,24 +10,26 @@ app/errors.mjs            화면에 보여 줄 오류(httpError)
 app/conversation.mjs      스레드 = 살아 있는 RPC 대화. 전사는 처음 한 번 + 이후 새 기록만, 닫힌 스레드는 저장된 문답으로 복원 (ADR 0028)
 app/jobs.mjs              설명 작업 레지스트리: 대기·분류·설명·완료·실패·중단, 같은 requestId 합류, 스트림 이벤트 (ADR 0029)
 app/prefetch.mjs          세션 감시기 공유·미리 설명 예약·10분 5개 상한 (ADR 0031)
-app/live.mjs              세션 폴링 → 질문·결과·계획만 선별, 재생에도 같은 기준 적용
+app/live.mjs              세션 폴링 → 질문·결과·계획만 선별, 재생에도 같은 기준 적용. 바이트는 session-file.mjs, 줄 해석은 호스트 adapter 의 events (ADR 0054)
+app/session-file.mjs      세션 파일 읽기 module: 머리, 잘린 첫 줄을 버린 꼬리, 넓혀 가며 읽는 꼬리, 이어 읽기(끝나지 않은 줄 보관, 줄어든 파일은 처음부터) (ADR 0054)
 app/jev.mjs               TypeSafe Jev 의미 판정. 사용 불가 시 구조화 질문만 유지하고 제한 안내
 app/store.mjs             문답·요청 기록 module: learning.json 원자적 저장, 모든 입구에서 프로필 확인, 요청 키·문답 식별자, 요청 상태(시작·완료·실패·중단), 즐겨찾기, 기본 프로필의 기존 questions.jsonl 읽기 (ADR 0052)
 app/learning.mjs          프로필 설정·의미 분류 계획(전사 없이)·핵심 단어·학습 상태·관련 기억 (ADR 0014·0030)
-app/thread.mjs            스레드 식별자: 질문 대상 내용(공백 차이 무시)의 해시, "" 는 세션 전체 대화 (ADR 0022·0052)
+app/thread.mjs            스레드 식별자: 질문 대상 내용(공백 차이 무시)의 해시, "" 는 세션 전체 대화. 문답마다 스레드를 붙이고, 같은 세션의 앞선 답을 다시 설명한 문답은 그 답의 스레드에 둔다 (ADR 0022·0052·0053)
+app/conversations.mjs     대화 목록과 스레드 소속(서버·웹·터미널 공용, 브라우저에도 정적 파일로 제공): 서버가 붙인 thread 로만 소속을 정함, 세션 전체 대화 + 사건 카드 + 카드 없는 저장 대화(마지막 활동 순), 질문과 함께 보낼 카드 목록 정리, 카드·답의 질문 대상 모양 (ADR 0053)
 app/models.mjs            omp 채팅 모델 카탈로그·단가·정확한 selector 검증 (ADR 0016)
 app/evidence.mjs          소스 검증·근거 추출·원문 위치와 주변 맥락 해석 (ADR 0014)
 app/review.mjs            답 속 용어 링크용 용어집: 저장된 핵심 단어 + `용어(풀이)` 규칙 추출
 app/wiki.mjs              배운 내용 다시보기 용어 사전: 핵심 단어 검증·집계·옛 문답 일괄 추출 (ADR 0020)
 app/trim.mjs              긴 전사 줄이기: 120,000자 넘으면 앞 턴은 사용자 발화만, 최근 턴은 그대로 (ADR 0009)
 app/peers.mjs             원격 세션 목록·전사·라이브 제공자 (ADR 0011·0014)
-app/dialogue.mjs          질문 대상 검증, 사건 카드의 질문 대상·미리 설명 요청문, 분류용 최근 대화 (ADR 0022·0028)
+app/dialogue.mjs          질문 대상 검증, 사건 카드의 질문 대상·스레드·미리 설명 요청문, 분류용 최근 대화 (ADR 0022·0028)
 app/slots.mjs             답 → {status, headline, explain, details[]}, Markdown 블록 보존 (ADR 0017)
-app/index.html            세션·작업 내용·카드별 대화·즐겨찾기·설정·배운 내용 다시보기·PiP. Streamdown 로컬 자산으로 Markdown 표시 (ADR 0015·0017)
+app/index.html            세션·작업 내용·카드별 대화·즐겨찾기·설정·배운 내용 다시보기·PiP. Streamdown 로컬 자산으로 Markdown 표시. 대화 목록과 스레드 소속은 /conversations.mjs (ADR 0015·0017·0053)
 app/mobile.css           600px 이하 단일 화면 탐색, 터치와 화면 키보드 레이아웃
 app/mobile.mjs           PWA 설치, 연결 안내, 모바일 표시 상태
 app/sw.js                개인 기록 없는 오프라인 안내만 캐시
-app/terminal-ui.mjs       터미널 클라이언트 화면: 대화, 입력창, 기호 메뉴, 선택 목록 (ADR 0038·0039)
+app/terminal-ui.mjs       터미널 클라이언트 화면: 대화, 입력창, 기호 메뉴, 선택 목록. 대화 목록과 스레드 소속은 conversations.mjs (ADR 0038·0039·0053)
 app/terminal-status.mjs   터미널 상태줄 규칙 표와 그리기, 좁은 화면 항목 빼기 (ADR 0040)
 app/terminal-markdown.mjs Pi Markdown 렌더러 연결과 제어 문자 차단 (ADR 0038)
 app/terminal-theme.mjs    OMP titanium 역할별 색 (ADR 0038)
@@ -37,11 +39,12 @@ adapters/omp/docent-command.ts  OMP `/docent` 슬래시 명령. `docent herdr`�
 app/doctor.mjs            `docent doctor`: Node, omp와 모델, 서버와 세션 수, 선택적 모델 호출 점검 (ADR 0041)
 INSTALL-AGENT.md          링크 하나로 에이전트가 따라 하는 설치 안내 (ADR 0041)
 bin/docent-mobile.mjs    Tailscale Serve 상태 확인과 명시적 사설 HTTPS 설정
-scripts/transcript-omp.mjs    omp 세션 jsonl → 사람이 읽는 전사 (모듈 + CLI)
-scripts/transcript-claude.mjs Claude Code 세션 jsonl → 같은 모양의 전사. 옆 폴더의 서브에이전트 전사를 띄운 자리에 접어 넣음 (모듈 + CLI, ADR 0013)
-scripts/transcript-codex.mjs  Codex CLI rollout jsonl → 같은 모양의 전사 (모듈 + CLI, ADR 0032)
-scripts/transcript-gemini.mjs Gemini CLI 채팅 기록(갱신 연산 접기) → 같은 모양의 전사 (모듈 + CLI, ADR 0032)
-scripts/transcript-pi.mjs     pi 세션 → omp 정규화기 재사용, 제목·모델 항목만 변환 (모듈 + CLI, ADR 0032)
+scripts/transcript-omp.mjs    omp 세션 adapter: 목록 메타 / 전사 / 사건 카드 후보. pi 도 쓰는 omp 모양 adapter (모듈 + CLI, ADR 0054)
+scripts/transcript-claude.mjs Claude Code 세션 adapter. 사용자 발화 없는 세션 숨김, 옆 폴더의 서브에이전트 전사를 띄운 자리에 접어 넣고 그 변경 표시(stamp)를 냄 (모듈 + CLI, ADR 0013·0054)
+scripts/transcript-codex.mjs  Codex CLI rollout adapter (모듈 + CLI, ADR 0032·0054)
+scripts/transcript-gemini.mjs Gemini CLI 채팅 기록 adapter(갱신 연산 접기, 작업 폴더는 파일 또는 .project_root) (모듈 + CLI, ADR 0032·0054)
+scripts/transcript-pi.mjs     pi 세션 adapter: 줄을 읽을 때 한 번 omp 모양으로 바꿔 omp adapter 를 씀 (모듈 + CLI, ADR 0032·0054)
+scripts/transcript-jsonl.mjs  adapter 공용: jsonl 줄 읽기(잘린 줄 건너뜀), 전사 머리말 쓰기와 작업 폴더 읽기(모르면 null), CLI (ADR 0054)
 scripts/transcript-source.mjs 메시지·내용 버전 기반 소스 표시, 코드와 서브에이전트 원문 보존
 scripts/install-omp.sh    프론트매터 + 코어를 결합해 omp 에이전트 파일로 설치
 docs/                     개념·범위·결정
@@ -77,7 +80,7 @@ docs/                     개념·범위·결정
 
 ## 세션 제공자
 
-`app/server.mjs` 의 `providers` 배열. `jsonlProvider({id, root, depth, match, headBytes, meta, normalize, parse, events, stamp})` 로 만든다. 지금은 `omp`(`~/.omp/agent/sessions/*/*.jsonl`), `claude`(`~/.claude/projects/*/*.jsonl`, 서브에이전트 파일을 `stamp`로 캐시 기준에 포함), `codex`(`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`), `gemini`(`~/.gemini/tmp/*/chats/session-*.jsonl`, 작업 폴더는 `.project_root`), `pi`(`~/.pi/agent/sessions/*/*.jsonl`). 목록은 바뀐 파일의 머리만 다시 읽는다. 새 호스트는 정규화 함수 하나 + 항목 하나. 전사 출력 모양(`## user` / `## assistant` / `→ 도구(…) ⇒ ok·에러·사용자 답`, AI의 질문은 질문 문장·선택지 포함)은 호스트가 달라도 같아야 한다. 도슨트는 구분하지 않는다.
+`app/server.mjs` 의 `providers` 배열. 호스트 adapter 하나를 `jsonlProvider(adapter)` 로 감싼다. adapter 는 `{id, dir, depth, match, headBytes, meta(head, path), transcript(text, path), events(chunk), stamp?(path)}` 이고 줄 해석, 숨김·제목 규칙, 작업 폴더 찾기를 안에 가진다 (ADR 0054). 지금은 `omp`(`~/.omp/agent/sessions/*/*.jsonl`), `claude`(`~/.claude/projects/*/*.jsonl`, 서브에이전트 파일을 `stamp`로 캐시 기준에 포함), `codex`(`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`), `gemini`(`~/.gemini/tmp/*/chats/session-*.jsonl`, 작업 폴더는 `.project_root`), `pi`(`~/.pi/agent/sessions/*/*.jsonl`). 목록은 바뀐 파일의 머리만 다시 읽는다. 새 호스트는 adapter 모듈 하나 + 배열 한 줄. 전사 출력 모양(`## user` / `## assistant` / `→ 도구(…) ⇒ ok·에러·사용자 답`, AI의 질문은 질문 문장·선택지 포함)은 호스트가 달라도 같아야 한다. 도슨트는 구분하지 않는다. 머리말의 작업 폴더를 모르면 `?` 로 적고, 학습 범위는 이를 작업 폴더 없음으로 읽는다.
 
 ## 웹앱 요청 흐름
 
@@ -93,7 +96,7 @@ docs/                     개념·범위·결정
 ## 라이브 흐름 (ADR 0006)
 
 1. 세션을 고르면 페이지가 `GET /api/live?id=&profileId=` SSE 를 연다. 서버는 세션마다 감시기 하나를 두고 화면 구독과 미리 설명이 함께 쓴다. `profileId` 없는 구독(다른 컴퓨터의 docent)은 미리 설명을 예약하지 않는다.
-2. `live.mjs` 가 먼저 파일 꼬리 512KB 에서 최근 이벤트 5개를 `past: true` 로 보내고(ADR 0012), 그 뒤 파일 끝에서 시작해 1초마다 새 바이트를 읽어 제공자의 `parse` → `events` 로 이벤트를 뽑는다. 카드 이벤트에는 서버가 만든 `focus`·`thread`와 미리 설명 상태(`ask`·`autoState`)가 붙는다.
+2. `live.mjs` 가 먼저 파일 꼬리 512KB 에서 최근 이벤트 5개를 `past: true` 로 보내고(ADR 0012), 그 뒤 파일 끝에서 시작해 1초마다 새로 끝난 줄을 읽어(`session-file.mjs`) 호스트 adapter 의 `events` 로 이벤트를 뽑는다. 카드 이벤트에는 서버가 만든 `focus`·`thread`와 미리 설명 상태(`ask`·`autoState`)가 붙는다.
 3. 구조화된 질문은 바로 선별한다. 어시스턴트 발화는 Jev로 질문·결과·계획인지 판정한다. 진행 중계·도구 오류·종료 신호 자체는 카드로 보내지 않는다. 판정기가 없거나 실패하면 구조화 질문만 남기고 제한을 알린다.
 4. 작업 내용 카드는 한 줄 요약 제목, 3문장 이내 요약, 상태로 이루어지고 원문은 접어 둔다. 요약은 준비된 설명의 결론과 핵심 설명 앞부분에서 만든다. 카드를 누르면 그 카드의 스레드가 열리고, 첫 메시지로 사건 원문(AI 출력 내용과 선택지)이 전체 너비로 보인다(ADR 0033). 카드에는 원문 아코디언이 없다. 모델 호출은 없다. 새 사건은 질문 대상·입력·읽던 위치를 바꾸지 않는다. 설명 생성과 근거 검증은 수동 질문과 같은 `/api/ask` 경로다.
 5. `/api/ask`는 의미 분류의 질문 종류·개념·이해 대상·분야와 답·검증된 근거·용어·바로잡기를 현재 프로필에 저장한다. 미리 설명은 수동 반복 횟수나 이해 상태를 바꾸지 않는다. `GET /api/history?id=&profileId=`로 해당 로컬 프로필의 이전 문답을 읽는다(`thread`·`display` 포함).

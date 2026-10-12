@@ -1,9 +1,10 @@
-// 스레드와 질문 대상 (ADR 0022·0028). 스레드 식별자·카드의 질문 대상·앱이 만든 요청문은 서버가 정한다.
+// 스레드와 질문 대상 (ADR 0022·0028·0053). 스레드 식별자·카드의 질문 대상·앱이 만든 요청문은 서버가 정한다.
 // 사실 근거는 현재 전사다. 과거 문답은 "그거", "두 번째" 같은 말이 무엇을 가리키는지 이해하는 데 쓴다.
+// 문답이 어느 스레드에 보이는지는 conversations.mjs 가 정한다.
 import { httpError } from "./errors.mjs";
-import { threadKey, threadText } from "./thread.mjs";
+import { FOCUS_MAX, blockTitle, excerpt } from "./conversations.mjs";
+import { threadKey } from "./thread.mjs";
 
-const FOCUS_MAX = 7800;
 const RECENT = 6;
 const clip = (text, max) => {
 	const value = String(text ?? "");
@@ -42,30 +43,12 @@ export function parseCards(value) {
 	return value.map(({ thread, label }) => ({ thread, label: label.trim() }));
 }
 
-function blockTitle(text) {
-	const lines = String(text ?? "").split("\n").map((line) => line.replace(/^\s*(?:[#>*+-]+\s*|\d+[.)]\s+)*/, "").replace(/[*_`]/g, "").replace(/^\s*[✅⏳⛔]\s*/u, "").trim()).filter(Boolean);
-	const line = lines.find((entry) => entry.length > 8) || lines[0] || "";
-	return line.length > 100 ? `${line.slice(0, 100)}…` : line;
-}
-
-function excerpt(text, max) {
-	if (text.length <= max) return text;
-	const half = Math.floor((max - 48) / 2);
-	return `${text.slice(0, half)}\n\n[중간 생략 — 전체 내용은 세션 전사에서 확인]\n\n${text.slice(-half)}`;
-}
-
 /** 라이브 사건 → 카드의 질문 대상과 스레드. 브라우저와 미리 설명이 같은 값을 쓴다. */
 export function focusOfEvent(ev) {
 	const options = Array.isArray(ev.options) ? ev.options.map((option) => `${option.label ?? ""}${option.description ? ` — ${option.description}` : ""}`).join("\n") : "";
 	const text = excerpt(`${ev.text.trim()}${options ? `\n\n선택지:\n${options}` : ""}`, FOCUS_MAX);
 	const focus = { label: blockTitle(ev.text) || EVENT_LABEL[ev.sub], text };
 	return { focus, thread: threadKey(text) };
-}
-
-/** 작업 내용 카드마다 대화가 따로 이어진다. 질문 대상 내용이 같은 문답만 같은 스레드다. 대상이 없으면 세션 전체 대화. */
-export function threadRecords(records, focus) {
-	const key = threadText(focus?.text);
-	return records.filter((record) => threadText(record.focus?.text) === key);
 }
 
 /** 학습 분류용 최근 대화 요약. 사용자가 스레드에서 읽은 미리 설명도 포함한다. */
