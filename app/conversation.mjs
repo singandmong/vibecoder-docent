@@ -76,7 +76,7 @@ export function conversationPool({ runner, system, max = MAX_LIVE, idleMs = IDLE
 	const release = () => waiting.shift()?.();
 
 	/**
-	 * 스레드에 질문 하나. 같은 스레드의 질문은 호출자가 순서대로 보낸다.
+	 * 스레드에 질문 하나. 같은 스레드의 질문은 설명 요청 module(ask.mjs)이 하나씩 보낸다.
 	 * @returns {Promise<{raw: string, evidence: {transcript: string, sources: Map}}>}
 	 */
 	async function ask({ key, model, prepared, records, instructions, question, thinking, onDelta, onRestart, onTranscript, signal, register }) {

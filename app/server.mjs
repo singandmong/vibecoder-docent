@@ -2,7 +2,6 @@
 import { execFile } from "node:child_process";
 import { mkdtemp, open, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -14,21 +13,18 @@ import { extractGeminiEvents, normalizeGeminiSession, parseGeminiLines, readGemi
 import { extractPiEvents, normalizePiSession, parsePiLines, readPiSessionMeta } from "../scripts/transcript-pi.mjs";
 import { jevEnabled } from "./jev.mjs";
 import { watchSession } from "./live.mjs";
-import { extractTerms, filterTerms, glossary } from "./review.mjs";
+import { glossary } from "./review.mjs";
 import { KEYWORD_PROMPT, extractInput, parseExtract, wiki } from "./wiki.mjs";
-import { parseAnswer } from "./slots.mjs";
 import { parsePeers, peerProvider } from "./peers.mjs";
 import { gitLocationOf, headOf } from "./repo.mjs";
 import { recentLine } from "./session-recent.mjs";
 import { config, favorites, history, saveConfig, saveKeywords, setFavorite } from "./store.mjs";
-import { extractCitations, prepareEvidence, resolveEvidence } from "./evidence.mjs";
+import { resolveEvidence } from "./evidence.mjs";
 import { modelCatalog, selectedModel } from "./models.mjs";
-import { DOMAINS_PROMPT, PLANNING_PROMPT, applyClassification, beginRequest, completeAnswer, createProfile, explanationHints, feedback, httpError, learningItems, parseDomains, parsePlan, planningContext, planningInput, profile, profiles, requestKey, requestSignature, resolveDifficulty, settleRequest, sourceScope, storedRequest, updateProfile } from "./learning.mjs";
-import { displayOf, parseCards, parseFocus, questionContext, recentDialogue, steerMessage, threadKey, threadRecords } from "./dialogue.mjs";
-import { CancelledError, createRunner } from "./runner.mjs";
-import { THINKING } from "./depth.mjs";
-import { conversationPool } from "./conversation.mjs";
-import { jobRegistry } from "./jobs.mjs";
+import { DOMAINS_PROMPT, PLANNING_PROMPT, createProfile, feedback, httpError, learningItems, profile, profiles, updateProfile } from "./learning.mjs";
+import { displayOf, parseFocus } from "./dialogue.mjs";
+import { createRunner } from "./runner.mjs";
+import { createAsk } from "./ask.mjs";
 import { prefetchHub } from "./prefetch.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -314,22 +310,13 @@ await writeFile(keywordPrompt, KEYWORD_PROMPT);
 const domainsPrompt = join(tmpRoot, "domain-classifier.txt");
 await writeFile(domainsPrompt, DOMAINS_PROMPT);
 const runner = await createRunner({ bin: OMP_BIN, tmpRoot, timeoutMs: OMP_TIMEOUT_MS });
-const threads = conversationPool({ runner, system: PROMPT });
-const jobs = jobRegistry();
 const extracting = new Map();
-const prepared = new Map();
-
-/** 정규화 전사와 근거 표식. 같은 전사면 표식 계산을 다시 하지 않는다. */
-async function sessionSource(id, provider) {
-	const original = await provider.transcript(id);
-	const cached = prepared.get(id);
-	if (cached?.original === original) return cached;
-	const entry = { original, prepared: prepareEvidence(original, id) };
-	prepared.delete(id);
-	prepared.set(id, entry);
-	while (prepared.size > TRANSCRIPT_CACHE) prepared.delete(prepared.keys().next().value);
-	return entry;
-}
+const asks = createAsk({
+	runner,
+	providerOf,
+	prompts: { docent: PROMPT, planner: plannerPrompt, domains: domainsPrompt },
+	notify: (sessionId, profileId, payload) => hub.notify(sessionId, profileId, payload),
+});
 
 /** 아직 단어를 뽑지 않은 문답을 모델 호출 한 번으로 정리한다. 같은 프로필의 동시 요청은 하나로 합친다. */
 function extractKeywords(profileId) {
@@ -365,137 +352,21 @@ async function body(req) {
 	return value;
 }
 
-/** 설명 → 근거 검증 → 저장 → (뒤에서) 학습 분류. 설명은 스레드 대화에서 스트림으로 나온다 (ADR 0028·0029·0032). */
-async function runAsk(job, { profileId, current, id, q, focus, auto, difficulty, cards, thread, requestId }) {
-	let release = null;
-	if (auto) release = await hub.gate.autoTurn(profileId, job.signal);
-	else hub.gate.manualStart(profileId);
-	try {
-		const begun = await beginRequest(profileId, job.key, job.signature);
-		if (begun.answer) return begun.answer;
-		if (begun.error) throw begun.error;
-		const t0 = Date.now();
-		try {
-			if (job.signal.aborted) throw new CancelledError();
-			const model = await selectedModel(current.model);
-			const p = providerOf(id);
-			const [source, records] = await Promise.all([sessionSource(id, p), history(id, profileId)]);
-			const scope = sourceScope(id, p.host, source.original);
-			const own = threadRecords(records, focus);
-			const context = { ...(await planningContext(profileId, scope, q, auto, focus)), dialogue: recentDialogue(own), cards };
-			// 분야별 깊이를 설정한 프로필만 설명 전에 분야를 짧게 판정한다.
-			let domains = [];
-			if (!difficulty && Object.keys(context.profile.domainDifficulties).length) {
-				job.emit({ type: "stage", stage: "planning" });
-				try {
-					domains = parseDomains(await runner.once({ system: domainsPrompt, task: JSON.stringify({ question: q, focus: focus?.label ?? null }), model, signal: job.signal }));
-				} catch (error) {
-					if (model || error.cancelled) throw error;
-				}
-			}
-			const depth = resolveDifficulty(context.profile, domains, difficulty);
-			job.emit({ type: "stage", stage: "explaining" });
-			// 분야 판정 중에 들어온 바로잡기는 질문에 합쳐서 설명을 시작한다.
-			const early = job.steers.map((message) => `\n(바로잡기) ${message}`).join("");
-			const generated = await threads.ask({
-				key: `${profileId}\n${id}\n${thread}\n${model?.selector ?? ""}`,
-				model,
-				prepared: source.prepared,
-				records: own,
-				instructions: `${explanationHints(context, depth)}\n${questionContext(focus)}`,
-				question: `${q}${early}`,
-				thinking: THINKING[depth.difficulty],
-				signal: job.signal,
-				onDelta: (text) => job.emit({ type: "delta", text }),
-				onRestart: () => job.emit({ type: "reset" }),
-				register: (steer) => { job.steerHandler = steer ? (message) => steer(steerMessage(message)) : null; },
-			});
-			const { raw, citations } = extractCitations(generated.raw, generated.evidence);
-			const ruleTerms = extractTerms(raw);
-			const jevTerms = await filterTerms(raw, ruleTerms);
-			const terms = jevTerms ?? ruleTerms;
-			const termsBy = jevTerms ? "jev" : "rule";
-			const answer = { raw, ...parseAnswer(raw), ms: Date.now() - t0, ...depth, terms, citations, requestId, model: model?.selector ?? null, thread };
-			const { response, startedAt } = await completeAnswer(begun.request, context, answer, { provider: p.id, project: scope.cwd ? basename(scope.cwd) : null, terms, termsBy, ...(job.steers.length ? { steers: [...job.steers] } : {}) });
-			classifyLater({ context, response, startedAt, model, sessionId: id, thread, cards });
-			return response;
-		} catch (error) {
-			await settleRequest(job.key, job.signal.aborted ? { cancelled: true } : error);
-			throw error;
-		}
-	} finally {
-		if (release) release();
-		else if (!auto) hub.gate.manualEnd(profileId);
-	}
-}
-
-/** 답이 나온 뒤 학습 분류를 채우고, 보고 있는 화면에 카드 제목·핵심 단어·카드 제안을 알린다. 실패해도 답은 그대로다. */
-function classifyLater({ context, response, startedAt, model, sessionId, thread, cards }) {
-	const profileId = context.profile.id;
-	return (async () => {
-		let plan;
-		try {
-			plan = parsePlan(await runner.once({ system: plannerPrompt, task: planningInput(context, response), model }), context);
-		} catch {
-			// 선택한 모델이 실패해도 다른 모델로 바꾸지 않는다. 분류를 추측하지 않고 알 수 없음으로 남긴다.
-			plan = { ...parsePlan("", context), warning: "학습 분류를 실행하지 못했어요. 개념, 분야를 추측하지 않았어요." };
-		}
-		const suggested = plan.card && plan.card !== thread ? cards.find((card) => card.thread === plan.card) : null;
-		const answer = await applyClassification(context, response.recordId, plan, startedAt, suggested ? { suggest: suggested } : {});
-		hub.notify(sessionId, profileId, { kind: "record", recordId: response.recordId, requestId: response.requestId, thread, answer });
-	})().catch((error) => console.error(`docent: 학습 분류를 저장하지 못했어요 (${error.message})`));
-}
-
-/** 요청 확인 후 진행 중인 작업에 붙거나 새 작업을 연다. 저장된 결과는 {answer} 또는 {error}. */
-async function openAsk(input) {
-	const { id, question, difficulty } = input;
-	const profileId = input.profileId ?? "default";
-	const requestId = input.requestId ?? randomUUID();
-	if (typeof id !== "string" || !id || id.length > 2048 || typeof question !== "string" || !question.trim() || question.length > 8000) throw httpError(400, "유효한 세션 id 와 8000자 이내의 질문이 필요해요.");
-	if (input.auto !== undefined && typeof input.auto !== "boolean") throw httpError(400, "auto 는 참/거짓이어야 해요.");
-	const focus = parseFocus(input.focus);
-	const cards = parseCards(input.cards);
-	const current = await profile(profileId);
-	resolveDifficulty(current, [], difficulty);
-	const q = question.trim();
-	const auto = Boolean(input.auto);
-	const key = requestKey(profileId, requestId);
-	const signature = requestSignature({ id, question: q, ...(focus ? { focus } : {}), auto, difficulty: difficulty ?? null });
-	const join = () => {
-		const running = jobs.get(key);
-		if (running && running.signature !== signature) throw httpError(409, "같은 requestId 를 다른 질문에 사용할 수 없어요.");
-		return running;
-	};
-	const running = join();
-	if (running) return running;
-	// 완료된 요청은 이후 모델 설정·카탈로그와 무관하게 저장된 답을 돌려준다.
-	const stored = await storedRequest(profileId, key, signature);
-	if (stored) return stored;
-	const again = join();
-	if (again) return again;
-	const thread = threadKey(focus?.text);
-	return jobs.start({
-		key,
-		signature,
-		meta: { profileId, sessionId: id, requestId, question: q, focus, thread, auto, difficulty: difficulty ?? null },
-		run: (job) => runAsk(job, { profileId, current, id, q, focus, auto, difficulty, cards, thread, requestId }),
-	});
-}
-
 const hub = prefetchHub({
 	watch: (sessionId, emit) => {
 		const p = providerOf(sessionId);
 		return p.live ? p.live(sessionId, emit) : watchSession(p.pathOf(sessionId), p, emit);
 	},
 	profile,
-	startJob: openAsk,
-	hasJob: (profileId, requestId) => Boolean(jobs.get(`${profileId}:${requestId}`)),
+	startJob: asks.open,
+	hasJob: asks.has,
+	waiting: asks.waiting,
 });
 
 const NDJSON = "application/x-ndjson";
 
 async function respondAsk(req, res, input) {
-	const opened = await openAsk(input);
+	const opened = await asks.open(input);
 	const stream = (req.headers.accept ?? "").includes(NDJSON);
 	const failure = (error) => ({ type: error.cancelled ? "cancelled" : "error", ...(error.cancelled ? {} : { status: error.status ?? 500, error: String(error.message ?? error) }) });
 	if (!opened.subscribe) {
@@ -522,11 +393,6 @@ async function respondAsk(req, res, input) {
 	});
 	req.on("close", stop);
 	res.on("close", stop);
-}
-
-function jobFor(input) {
-	const profileId = input.profileId ?? "default";
-	return jobs.get(requestKey(profileId, input.requestId));
 }
 
 async function evidenceFor(sessionId, ref, profileId) {
@@ -655,27 +521,12 @@ const handler = async (req, res) => {
 			return;
 		}
 		if (req.method === "POST" && url.pathname === "/api/ask") return await respondAsk(req, res, await body(req));
-		if (req.method === "POST" && url.pathname === "/api/ask/cancel") {
-			const input = await body(req);
-			await profile(input.profileId ?? "default");
-			return json(res, 200, { cancelled: Boolean(jobFor(input)?.cancel()) });
-		}
+		if (req.method === "POST" && url.pathname === "/api/ask/cancel") return json(res, 200, { cancelled: await asks.cancel(await body(req)) });
 		if (req.method === "POST" && url.pathname === "/api/ask/steer") {
-			const input = await body(req);
-			await profile(input.profileId ?? "default");
-			if (typeof input.message !== "string" || !input.message.trim() || input.message.length > 2000) throw httpError(400, "바로잡기 문장은 2000자 이내로 입력하세요.");
-			if (!jobFor(input)?.steer(input.message.trim())) throw httpError(409, "지금 진행 중인 설명이 없어 바로잡을 수 없어요.");
+			await asks.steer(await body(req));
 			return json(res, 200, { steered: true });
 		}
-		if (req.method === "GET" && url.pathname === "/api/jobs") {
-			const id = url.searchParams.get("id") ?? "";
-			const profileId = url.searchParams.get("profileId") ?? "default";
-			await profile(profileId);
-			return json(res, 200, jobs.list((meta) => meta.profileId === profileId && meta.sessionId === id).map((job) => ({
-				requestId: job.meta.requestId, question: job.meta.question, ...(displayOf(job.meta.question) ? { display: displayOf(job.meta.question) } : {}),
-				focus: job.meta.focus, thread: job.meta.thread, auto: job.meta.auto, difficulty: job.meta.difficulty, stage: job.stage, text: job.text,
-			})));
-		}
+		if (req.method === "GET" && url.pathname === "/api/jobs") return json(res, 200, await asks.list(url.searchParams.get("profileId") ?? "default", url.searchParams.get("id") ?? ""));
 		if (req.method === "GET" && url.pathname === "/api/prefetch") {
 			const profileId = url.searchParams.get("profileId") ?? "default";
 			const current = await profile(profileId);
@@ -785,9 +636,9 @@ async function shutdown() {
 	if (stopping) return;
 	stopping = true;
 	for (const server of listeners.values()) server.close();
-	const active = jobs.list(() => true);
-	for (const job of active) job.cancel();
-	await Promise.allSettled([runner.close(), ...active.map((job) => job.done)]);
+	// 작업을 먼저 중단해야 요청이 실패가 아니라 중단으로 남는다.
+	const stopped = asks.close();
+	await Promise.allSettled([runner.close(), stopped]);
 	process.exit(0);
 }
 process.on("SIGTERM", shutdown);

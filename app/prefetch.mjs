@@ -6,77 +6,31 @@ import { EVENT_REQUEST, focusOfEvent } from "./dialogue.mjs";
 const WATCH_MS = 12 * 60 * 60 * 1000;
 const LIMIT = 5;
 const WINDOW_MS = 10 * 60 * 1000;
-const MANUAL_GRACE_MS = 1500;
 const RECENT_MAX = 5;
 
-/** 사용자 질문이 미리 설명보다 먼저다. 미리 설명은 프로필마다 하나씩. */
-function priorityGate() {
+/** 10분 창 안의 미리 설명 예약 수. 예약 시점에 세야 몰려온 사건도 상한을 지킨다. */
+function startLimit() {
 	const profiles = new Map();
 	const of = (id) => {
-		if (!profiles.has(id)) profiles.set(id, { manual: 0, lastManual: 0, autoBusy: false, waiters: [], starts: [], queued: 0 });
-		return profiles.get(id);
-	};
-	const pump = (id) => {
-		const entry = of(id);
-		if (entry.autoBusy || entry.manual || !entry.waiters.length) return;
-		const wait = entry.lastManual + MANUAL_GRACE_MS - Date.now();
-		if (wait > 0) {
-			setTimeout(() => pump(id), wait).unref();
-			return;
-		}
-		const next = entry.waiters.shift();
-		entry.autoBusy = true;
-		next();
+		if (!profiles.has(id)) profiles.set(id, []);
+		const starts = profiles.get(id);
+		while (starts.length && starts[0] <= Date.now() - WINDOW_MS) starts.shift();
+		return starts;
 	};
 	return {
-		manualStart(id) { of(id).manual++; },
-		manualEnd(id) {
-			const entry = of(id);
-			entry.manual = Math.max(0, entry.manual - 1);
-			entry.lastManual = Date.now();
-			pump(id);
-		},
-		/** 10분 창 안의 미리 설명 예약 수를 센다. 예약 시점에 세야 몰려온 사건도 상한을 지킨다. */
-		claim(id) { of(id).starts.push(Date.now()); },
-		/** 미리 설명 차례를 기다린다. 돌려받은 함수로 차례를 넘긴다. */
-		autoTurn(id, signal) {
-			const entry = of(id);
-			entry.queued++;
-			return new Promise((res, rej) => {
-				const grant = () => {
-					entry.queued--;
-					signal?.removeEventListener("abort", onAbort);
-					res(() => {
-						entry.autoBusy = false;
-						pump(id);
-					});
-				};
-				const onAbort = () => {
-					const index = entry.waiters.indexOf(grant);
-					if (index >= 0) entry.waiters.splice(index, 1);
-					entry.queued--;
-					rej(signal.reason ?? new Error("aborted"));
-				};
-				signal?.addEventListener("abort", onAbort, { once: true });
-				entry.waiters.push(grant);
-				pump(id);
-			});
-		},
-		usage(id) {
-			const entry = of(id);
-			while (entry.starts.length && entry.starts[0] <= Date.now() - WINDOW_MS) entry.starts.shift();
-			return { used: entry.starts.length, queued: entry.queued, limit: LIMIT };
-		},
+		claim(id) { of(id).push(Date.now()); },
+		used: (id) => of(id).length,
 	};
 }
 
 export const prefetchRequestId = (profileId, sessionId, thread) => `auto-${createHash("sha256").update(`${profileId}\n${sessionId}\n${thread}`).digest("hex").slice(0, 32)}`;
 
 /**
- * @param {{watch: (sessionId: string, emit: (ev: object) => void) => () => void, profile: (id: string) => Promise<object>, startJob: (input: object) => {key: string}, hasJob: (profileId: string, requestId: string) => boolean}} deps
+ * 미리 설명 작업은 설명 요청 module(ask.mjs)이 연다. 사용자 질문과의 차례도 그쪽이 정한다.
+ * @param {{watch: (sessionId: string, emit: (ev: object) => void) => () => void, profile: (id: string) => Promise<object>, startJob: (input: object) => Promise<object>, hasJob: (profileId: string, requestId: string) => boolean, waiting: (profileId: string) => number}} deps
  */
-export function prefetchHub({ watch, profile, startJob, hasJob }) {
-	const gate = priorityGate();
+export function prefetchHub({ watch, profile, startJob, hasJob, waiting }) {
+	const limit = startLimit();
 	const sessions = new Map();
 
 	const expire = () => {
@@ -99,9 +53,9 @@ export function prefetchHub({ watch, profile, startJob, hasJob }) {
 		const ask = { requestId, question: EVENT_REQUEST[card.sub], display: "쉽게 설명해줘", difficulty: "EASY" };
 		const entry = sessions.get(sessionId);
 		if (hasJob(profileId, requestId) || entry?.scheduled.has(`${profileId}\n${requestId}`)) return { ...card, ask, autoState: "duplicate" };
-		if (gate.usage(profileId).used >= LIMIT) return { ...card, ask: null, autoState: "limited" };
+		if (limit.used(profileId) >= LIMIT) return { ...card, ask: null, autoState: "limited" };
 		entry?.scheduled.add(`${profileId}\n${requestId}`);
-		gate.claim(profileId);
+		limit.claim(profileId);
 		try {
 			// 작업이 등록된 뒤에 카드를 보내야 브라우저가 같은 요청으로 붙을 수 있다.
 			await startJob({ id: sessionId, profileId, question: ask.question, focus: card.focus, auto: true, difficulty: "EASY", requestId });
@@ -141,7 +95,6 @@ export function prefetchHub({ watch, profile, startJob, hasJob }) {
 	}
 
 	return {
-		gate,
 		/** 화면 구독. 최근 카드를 past 로 먼저 보내고 이후 사건을 보낸다. */
 		subscribe({ sessionId, profileId, send }) {
 			const fresh = !sessions.has(sessionId);
@@ -159,7 +112,7 @@ export function prefetchHub({ watch, profile, startJob, hasJob }) {
 			};
 		},
 		status(profileId) {
-			return gate.usage(profileId);
+			return { used: limit.used(profileId), queued: waiting(profileId), limit: LIMIT };
 		},
 		/** 이 세션을 보고 있는 같은 프로필 화면에 알린다(예: 뒤에서 끝난 학습 분류). */
 		notify(sessionId, profileId, payload) {

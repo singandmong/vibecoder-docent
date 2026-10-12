@@ -66,6 +66,25 @@ test("a correction restarts the answer in the same conversation, joiners share o
 	await until(async () => (await f.api(`/api/jobs?id=${encodeURIComponent(f.sessionId)}&profileId=default`)).body.length === 0);
 });
 
+test("a user question on a thread whose pre-explanation is still running waits its turn, and both explanations finish", async (t) => {
+	const f = await fixture(t);
+	await f.control({ slowExplanation: 40 });
+	const focus = { label: "리얼타임 위치", text: "보유 계정 기준으로 어디에 리얼타임을 둘까?" };
+	let user;
+	const auto = await f.stream({ question: "쉽게 설명해줘", focus, auto: true, difficulty: "EASY", requestId: "auto-running" }, (line) => {
+		if (line.type === "delta" && !user) user = f.stream({ question: "그럼 비용은?", focus, requestId: "user-next" });
+	});
+	assert.equal(auto.at(-1).type, "answer");
+	const asked = await user;
+	assert.equal(asked.at(-1).type, "answer", JSON.stringify(asked.at(-1)));
+	const calls = await explanations(f);
+	assert.equal(calls.length, 2);
+	assert.equal(calls[0].pid, calls[1].pid);
+	assert.match(calls[1].message, /그럼 비용은\?/);
+	const rows = (await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}&profileId=default`)).body;
+	assert.deepEqual(rows.map((row) => row.requestId ?? row.answer.requestId), ["auto-running", "user-next"]);
+});
+
 test("the server pre-explains a new AI question for a profile that opened the session, even after the tab closes", async (t) => {
 	const f = await fixture(t);
 	const controller = new AbortController();
