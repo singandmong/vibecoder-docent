@@ -1,16 +1,16 @@
 // 도슨트 로컬 웹앱. 서버는 Node 내장 모듈, 설명 렌더러는 로컬 빌드 자산을 사용한다.
 import { execFile } from "node:child_process";
-import { mkdtemp, open, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { claudeSubagentStamp, extractClaudeEvents, normalizeClaudeSession, parseClaudeLines, readClaudeSessionMeta, readClaudeSubagents } from "../scripts/transcript-claude.mjs";
-import { extractOmpEvents, normalizeOmpSession, parseOmpLines, readOmpSessionMeta } from "../scripts/transcript-omp.mjs";
-import { extractCodexEvents, normalizeCodexSession, parseCodexLines, readCodexSessionMeta } from "../scripts/transcript-codex.mjs";
-import { extractGeminiEvents, normalizeGeminiSession, parseGeminiLines, readGeminiProjectRoot, readGeminiSessionMeta } from "../scripts/transcript-gemini.mjs";
-import { extractPiEvents, normalizePiSession, parsePiLines, readPiSessionMeta } from "../scripts/transcript-pi.mjs";
+import { claudeAdapter } from "../scripts/transcript-claude.mjs";
+import { ompAdapter } from "../scripts/transcript-omp.mjs";
+import { codexAdapter } from "../scripts/transcript-codex.mjs";
+import { geminiAdapter } from "../scripts/transcript-gemini.mjs";
+import { piAdapter } from "../scripts/transcript-pi.mjs";
 import { jevEnabled } from "./jev.mjs";
 import { watchSession } from "./live.mjs";
 import { glossary } from "./review.mjs";
@@ -18,6 +18,7 @@ import { KEYWORD_PROMPT, extractInput, parseExtract, wiki } from "./wiki.mjs";
 import { parsePeers, peerProvider } from "./peers.mjs";
 import { gitLocationOf, headOf } from "./repo.mjs";
 import { recentLine } from "./session-recent.mjs";
+import { pickFromTail, readHead } from "./session-file.mjs";
 import { config, favorites, history, saveConfig, saveKeywords, setFavorite } from "./store.mjs";
 import { resolveEvidence } from "./evidence.mjs";
 import { modelCatalog, selectedModel } from "./models.mjs";
@@ -39,6 +40,7 @@ const STATIC_ASSETS = new Map([
 	["/assets/Pretendard-LICENSE.txt", ["assets/Pretendard-LICENSE.txt", "text/plain; charset=utf-8"]],
 	["/mobile.css", ["mobile.css", "text/css; charset=utf-8"]],
 	["/mobile.mjs", ["mobile.mjs", "text/javascript; charset=utf-8"]],
+	["/conversations.mjs", ["conversations.mjs", "text/javascript; charset=utf-8"]],
 	["/manifest.webmanifest", ["manifest.webmanifest", "application/manifest+json; charset=utf-8"]],
 	["/sw.js", ["sw.js", "text/javascript; charset=utf-8"]],
 	["/offline.html", ["offline.html", "text/html; charset=utf-8"]],
@@ -102,10 +104,13 @@ async function describeSessions(sessions) {
 }
 
 /**
- * 세션 폴더 하나를 제공자로. 파일은 `root` 아래 `depth` 단계 폴더 안에 있고 이름이 `match` 와 맞아야 한다.
- * `stamp(path)` 는 본 파일 밖에서 전사에 들어가는 것(예: 서브에이전트 파일)의 변경 표시다.
+ * 호스트 adapter 하나를 세션 제공자로. 파일은 `~/<adapter.dir>` 아래 `depth` 단계 폴더 안에 있고 이름이 `match` 와 맞아야 한다.
+ * 파일을 읽는 일은 session-file.mjs, 읽은 글의 해석(목록 메타·숨김, 전사, 사건 카드)은 adapter 가 한다.
+ * `adapter.stamp(path)` 는 본 파일 밖에서 전사에 들어가는 것(예: 서브에이전트 파일)의 변경 표시다.
  */
-function jsonlProvider({ id, root, depth = 1, match = /\.jsonl$/, headBytes, meta, normalize, parse, events, stamp = async () => "" }) {
+function jsonlProvider(adapter) {
+	const { id, depth = 1, match = /\.jsonl$/, headBytes } = adapter;
+	const root = join(HOME, adapter.dir);
 	const metas = new Map();
 	const recents = new Map();
 	const walk = async (dir, level) => {
@@ -122,8 +127,7 @@ function jsonlProvider({ id, root, depth = 1, match = /\.jsonl$/, headBytes, met
 	return {
 		id,
 		root,
-		parse,
-		events,
+		events: adapter.events,
 		/** 머리 읽기는 파일이 바뀐 것만. 이어 쓰는 세션은 머리가 한 번 다 찼으면 다시 읽지 않는다. */
 		async list() {
 			const out = [];
@@ -134,7 +138,7 @@ function jsonlProvider({ id, root, depth = 1, match = /\.jsonl$/, headBytes, met
 				let m;
 				if (cached && (cached.mtimeMs === st.mtimeMs || (cached.m && cached.full && st.size >= cached.size))) m = cached.m;
 				else {
-					m = await meta(await readHead(path, headBytes), path);
+					m = await adapter.meta(await readHead(path, headBytes), path);
 					metas.set(path, { mtimeMs: st.mtimeMs, size: st.size, full: st.size >= headBytes, m });
 				}
 				if (!m) continue;
@@ -166,11 +170,7 @@ function jsonlProvider({ id, root, depth = 1, match = /\.jsonl$/, headBytes, met
 			const st = await stat(path);
 			const cached = recents.get(path);
 			if (cached?.mtimeMs === st.mtimeMs) return cached.line;
-			let line = "";
-			for (const bytes of RECENT_TAIL_BYTES) {
-				line = recentLine(events(parse(await readTail(path, st.size, bytes))));
-				if (line || bytes >= st.size) break;
-			}
+			const line = await pickFromTail(path, RECENT_TAIL_BYTES, (tail) => recentLine(adapter.events(tail)), st.size);
 			recents.set(path, { mtimeMs: st.mtimeMs, line });
 			return line;
 		},
@@ -179,10 +179,10 @@ function jsonlProvider({ id, root, depth = 1, match = /\.jsonl$/, headBytes, met
 			const path = this.pathOf(sid);
 			const st = await stat(path);
 			if (st.size > MAX_SESSION_BYTES) throw httpError(413, "session too large");
-			const version = `${st.size}:${st.mtimeMs}:${await stamp(path)}`;
+			const version = `${st.size}:${st.mtimeMs}:${adapter.stamp ? await adapter.stamp(path) : ""}`;
 			const cached = transcripts.get(path);
 			if (cached?.version === version) return cached.md;
-			const md = await normalize(await readFile(path, "utf8"), path);
+			const md = await adapter.transcript(await readFile(path, "utf8"), path);
 			transcripts.delete(path);
 			transcripts.set(path, { version, md });
 			while (transcripts.size > TRANSCRIPT_CACHE) transcripts.delete(transcripts.keys().next().value);
@@ -191,92 +191,11 @@ function jsonlProvider({ id, root, depth = 1, match = /\.jsonl$/, headBytes, met
 	};
 }
 
-// 호스트별 세션 제공자. 새 호스트는 정규화 함수 + 항목 하나. 뒤에 원격 docent(peers)가 붙는다.
+// 호스트별 세션 제공자. 새 호스트는 adapter 모듈 하나 + 여기 한 줄. 뒤에 원격 docent(peers)가 붙는다.
 const providers = [
-	jsonlProvider({
-		id: "omp",
-		root: join(HOME, ".omp/agent/sessions"),
-		headBytes: 256 * 1024, // session_init 의 시스템 프롬프트 뒤에 첫 사용자 발화가 온다
-		meta: readOmpSessionMeta,
-		normalize: normalizeOmpSession,
-		parse: parseOmpLines,
-		events: extractOmpEvents,
-	}),
-	jsonlProvider({
-		id: "claude",
-		root: join(HOME, ".claude/projects"),
-		headBytes: 256 * 1024, // 첫 사용자 발화 앞에 attachment 가 길게 붙을 수 있음
-		meta: (head) => {
-			const m = readClaudeSessionMeta(head);
-			return m.title === "(제목 없음)" ? null : m; // 사용자 발화 없는 세션(로그인 등)은 숨김
-		},
-		normalize: async (jsonl, path) => normalizeClaudeSession(jsonl, path, await readClaudeSubagents(path)),
-		stamp: claudeSubagentStamp,
-		parse: parseClaudeLines,
-		events: extractClaudeEvents,
-	}),
-	jsonlProvider({
-		id: "codex",
-		root: join(HOME, ".codex/sessions"),
-		depth: 3, // YYYY/MM/DD/rollout-*.jsonl
-		match: /^rollout-.*\.jsonl$/,
-		headBytes: 512 * 1024, // session_meta 에 긴 기본 지시문이 붙는다
-		meta: readCodexSessionMeta,
-		normalize: normalizeCodexSession,
-		parse: parseCodexLines,
-		events: extractCodexEvents,
-	}),
-	jsonlProvider({
-		id: "gemini",
-		root: join(HOME, ".gemini/tmp"),
-		depth: 2, // <project>/chats/session-*.jsonl (서브에이전트 파일은 한 단계 더 안쪽)
-		match: /^session-.*\.jsonl$/,
-		headBytes: 256 * 1024,
-		meta: (head, path) => {
-			const m = readGeminiSessionMeta(head);
-			return m && { ...m, cwd: m.cwd ?? readGeminiProjectRoot(path) };
-		},
-		normalize: (jsonl, path) => normalizeGeminiSession(jsonl, path, readGeminiProjectRoot(path)),
-		parse: parseGeminiLines,
-		events: extractGeminiEvents,
-	}),
-	jsonlProvider({
-		id: "pi",
-		root: join(HOME, ".pi/agent/sessions"),
-		headBytes: 256 * 1024,
-		meta: readPiSessionMeta,
-		normalize: normalizePiSession,
-		parse: parsePiLines,
-		events: extractPiEvents,
-	}),
+	...[ompAdapter, claudeAdapter, codexAdapter, geminiAdapter, piAdapter].map((adapter) => jsonlProvider(adapter)),
 	...Object.entries(PEERS).map(([name, base]) => peerProvider(name, base)),
 ];
-
-async function readHead(path, bytes) {
-	const fh = await open(path, "r");
-	try {
-		const buf = Buffer.alloc(bytes);
-		const { bytesRead } = await fh.read(buf, 0, bytes, 0);
-		// 마지막 불완전한 줄은 파서가 버린다
-		return buf.subarray(0, bytesRead).toString("utf8");
-	} finally {
-		await fh.close();
-	}
-}
-
-/** 파일 끝 bytes 만큼. 잘린 첫 줄은 버린다. */
-async function readTail(path, size, bytes) {
-	const start = Math.max(0, size - bytes);
-	const fh = await open(path, "r");
-	try {
-		const buf = Buffer.alloc(size - start);
-		const { bytesRead } = await fh.read(buf, 0, buf.length, start);
-		const text = buf.subarray(0, bytesRead).toString("utf8");
-		return start > 0 ? text.slice(text.indexOf("\n") + 1) : text;
-	} finally {
-		await fh.close();
-	}
-}
 
 const providerOf = (id) => {
 	const p = providers.find((p) => (p.owns ? p.owns(id) : id.startsWith(`${p.id}:`)));

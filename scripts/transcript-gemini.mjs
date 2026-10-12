@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Gemini CLI 세션 jsonl (~/.gemini/tmp/<project>/chats/session-<ts>-<id>.jsonl) → 사람이 읽는 전사 markdown.
+// Gemini CLI 세션 adapter (~/.gemini/tmp/<project>/chats/session-<ts>-<id>.jsonl) → 목록 메타 / 전사 markdown / 사건 카드 후보.
 // 출력 모양은 transcript-omp.mjs 와 같다. 도슨트는 둘을 구분하지 않는다.
 //
 // 파일 형식 (packages/core/src/services/chatRecordingService.ts):
@@ -9,13 +9,13 @@
 //            또는 {$rewindTo: "<messageId>"} — 그 메시지부터 끝까지 되돌림
 //   같은 id 의 메시지가 다시 나오면 최신 것이 이긴다 (도구 결과가 뒤에 채워진다).
 // cwd 는 파일 안에 없다. meta.directories(/dir 추가분)가 있으면 쓰고, 아니면
-// readGeminiProjectRoot() 가 옆의 .project_root 표시 파일을 읽는다.
+// 세션 파일 위쪽 폴더의 .project_root 표시 파일을 읽는다(목록 메타와 전사 모두 이 adapter 안에서).
 // CLI:    scripts/transcript-gemini.mjs <session.jsonl> [out.md]
-// module: import { normalizeGeminiSession } from "./transcript-gemini.mjs"
-import { readFileSync, writeFileSync } from "node:fs";
+// module: import { geminiAdapter } from "./transcript-gemini.mjs"
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { askQuestionLines, errorSummary } from "./event-text.mjs";
+import { jsonLines, transcriptCli, transcriptHeader } from "./transcript-jsonl.mjs";
 import { sourceWriter } from "./transcript-source.mjs";
 
 const ERROR_LINES = 8;
@@ -121,22 +121,9 @@ const foldGeminiEntries = (entries) => {
 	return { meta, messages: [...messages.values()] };
 };
 
-export function parseGeminiLines(jsonl) {
-	const out = [];
-	for (const line of jsonl.split("\n")) {
-		if (!line) continue;
-		try {
-			out.push(JSON.parse(line));
-		} catch {
-			// 잘린 줄 무시
-		}
-	}
-	return out;
-}
-
-/** jsonl 본문을 전사 markdown 으로. `source` 는 헤더에 적을 원본 표시, `projectRoot` 는 .project_root 표시 파일의 작업 폴더. */
-export function normalizeGeminiSession(jsonl, source = "", projectRoot = null) {
-	const { meta, messages } = foldGeminiEntries(parseGeminiLines(jsonl));
+/** 엔트리 목록을 전사 markdown 으로. `source` 는 헤더에 적을 원본 표시, `projectRoot` 는 .project_root 표시 파일의 작업 폴더. */
+function transcriptOf(entries, source, projectRoot) {
+	const { meta, messages } = foldGeminiEntries(entries);
 	const mark = sourceWriter(`gemini:${meta.sessionId ?? ""}`);
 
 	const toolLines = (msg, call, part) => {
@@ -160,14 +147,7 @@ export function normalizeGeminiSession(jsonl, source = "", projectRoot = null) {
 		return out;
 	};
 
-	const out = [
-		`# ${meta.summary ?? "(제목 없음)"}`,
-		"",
-		`- 원본: ${source}`,
-		`- 작업 폴더: ${meta.directories?.[0] ?? projectRoot ?? "?"}`,
-		`- 시작: ${meta.startTime ?? "?"}`,
-		"",
-	];
+	const out = transcriptHeader({ title: meta.summary ?? "(제목 없음)", source, cwd: meta.directories?.[0] ?? projectRoot, started: meta.startTime });
 	let lastRole = null;
 	const section = (role) => {
 		if (role !== lastRole) out.push("", `## ${role}`, "");
@@ -199,8 +179,8 @@ export function normalizeGeminiSession(jsonl, source = "", projectRoot = null) {
 }
 
 /** 세션 파일 머리만 읽어 목록용 메타를 뽑는다. 사용자 발화가 없으면 null. */
-export function readGeminiSessionMeta(head) {
-	const { meta, messages } = foldGeminiEntries(parseGeminiLines(head));
+function sessionMeta(entries) {
+	const { meta, messages } = foldGeminiEntries(entries);
 	let first = null;
 	for (const m of messages) {
 		if (m.type !== "user") continue;
@@ -221,9 +201,9 @@ export function readGeminiSessionMeta(head) {
 /**
  * 세션 파일 옆의 .project_root 표시 파일에서 작업 폴더를 읽는다.
  * chats/<file> 은 한 단계, chats/<parent>/<file> (서브에이전트)는 두 단계 위에 있다.
- * meta 함수는 파일 머리 문자열만 받으므로 경로가 필요한 쪽에서 따로 부른다.
  */
-export function readGeminiProjectRoot(sessionPath) {
+function projectRootOf(sessionPath) {
+	if (!sessionPath) return null;
 	let dir = dirname(sessionPath);
 	for (let i = 0; i < 3; i++) {
 		dir = dirname(dir);
@@ -237,8 +217,8 @@ export function readGeminiProjectRoot(sessionPath) {
 	return null;
 }
 
-/** 새로 추가된 레코드에서 라이브 이벤트를 뽑는다. {kind, text, options?} */
-export function extractGeminiEvents(entries) {
+/** 엔트리에서 사건 카드 후보를 뽑는다. {kind, text, options?} */
+function eventsOf(entries) {
 	const out = [];
 	const emit = (m) => {
 		const ts = m.timestamp ?? null;
@@ -272,15 +252,25 @@ export function extractGeminiEvents(entries) {
 	return out;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-	const [, , input, output] = process.argv;
-	if (!input) {
-		console.error("usage: transcript-gemini.mjs <session.jsonl> [out.md]");
-		process.exit(2);
-	}
-	const md = normalizeGeminiSession(readFileSync(input, "utf8"), input);
-	if (output) {
-		writeFileSync(output, md);
-		console.error(`wrote ${output} (${md.length} chars)`);
-	} else process.stdout.write(md);
-}
+export const geminiAdapter = {
+	id: "gemini",
+	dir: ".gemini/tmp",
+	depth: 2, // <project>/chats/session-*.jsonl (서브에이전트 파일은 한 단계 더 안쪽)
+	match: /^session-.*\.jsonl$/,
+	headBytes: 256 * 1024,
+	/** 목록 메타 {title, cwd, started, first}. 사용자 발화가 없으면 null. 작업 폴더는 파일 안에 없으면 .project_root. */
+	meta(head, path) {
+		const m = sessionMeta(jsonLines(head));
+		return m && { ...m, cwd: m.cwd ?? projectRootOf(path) };
+	},
+	/** 전사 markdown. `path` 는 헤더의 원본 표시이자 .project_root 를 찾는 기준. */
+	transcript(text, path = "") {
+		return transcriptOf(jsonLines(text), path, projectRootOf(path));
+	},
+	/** 새로 끝난 줄들에서 사건 카드 후보. */
+	events(chunk) {
+		return eventsOf(jsonLines(chunk));
+	},
+};
+
+await transcriptCli(import.meta.url, geminiAdapter);

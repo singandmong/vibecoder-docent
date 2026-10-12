@@ -6,6 +6,7 @@ import { httpError } from "./errors.mjs";
 import { fingerprint, profileFrom, readState, updateState } from "./store.mjs";
 import { selectedModel } from "./models.mjs";
 import { PLANNING_KEYWORDS_RULE, parseKeywords } from "./wiki.mjs";
+import { transcriptCwd } from "../scripts/transcript-jsonl.mjs";
 
 export const TARGETS = ["ai-process", "language", "dev-process", "code"];
 const STATUSES = ["unknown", "unresolved", "understood", "review"];
@@ -100,9 +101,10 @@ export function feedback(id, profileId, status, unresolved) {
 	});
 }
 
+/** 설명 하나의 학습 범위. 작업 폴더를 모르는 세션은 프로젝트 범위를 갖지 않는다(서로 다른 세션이 한 범위로 묶이지 않게). */
 export function sourceScope(sessionId, host, transcript) {
-	const cwd = /^- 작업 폴더: (.+)$/m.exec(transcript)?.[1]?.trim();
-	return { sessionId, project: cwd ? `project:${host ?? "local"}:${cwd}` : null, cwd: cwd ?? null, fingerprint: fingerprint(transcript) };
+	const cwd = transcriptCwd(transcript);
+	return { sessionId, project: cwd ? `project:${host ?? "local"}:${cwd}` : null, cwd, fingerprint: fingerprint(transcript) };
 }
 
 /** 범위와 용량만으로 후보를 좁힌다. 실제 관련성·동일 개념 판정은 아래 모델 계획 단계가 한다. */

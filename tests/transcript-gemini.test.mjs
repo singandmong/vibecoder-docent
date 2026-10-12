@@ -1,18 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
 import { prepareEvidence } from "../app/evidence.mjs";
-import {
-	extractGeminiEvents,
-	normalizeGeminiSession,
-	parseGeminiLines,
-	readGeminiProjectRoot,
-	readGeminiSessionMeta,
-} from "../scripts/transcript-gemini.mjs";
-
-const jsonl = (entries) => entries.map((entry) => JSON.stringify(entry)).join("\n");
+import { geminiAdapter } from "../scripts/transcript-gemini.mjs";
+import { jsonl, sessionFixture } from "./session-fixture.mjs";
 
 const header = {
 	sessionId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -61,7 +51,7 @@ const base = [
 ];
 
 test("gemini transcript shows user and assistant sections, tool calls and results", () => {
-	const md = normalizeGeminiSession(jsonl(base), "gemini:project/chats/session-x.jsonl");
+	const md = geminiAdapter.transcript(jsonl(base), "gemini:project/chats/session-x.jsonl");
 	assert.ok(md.includes("# 로그인 버그 수정"));
 	assert.ok(md.includes("- 원본: gemini:project/chats/session-x.jsonl"));
 	assert.ok(md.includes("- 시작: 2026-09-25T01:00:00.000Z"));
@@ -77,7 +67,7 @@ test("gemini transcript shows user and assistant sections, tool calls and result
 });
 
 test("gemini transcript marks pending tool calls and cancelled ones as errors", () => {
-	const md = normalizeGeminiSession(jsonl([
+	const md = geminiAdapter.transcript(jsonl([
 		header,
 		{ id: "u-1", timestamp: "t", type: "user", content: [{ text: "확인해줘" }] },
 		{
@@ -94,7 +84,7 @@ test("gemini transcript marks pending tool calls and cancelled ones as errors", 
 });
 
 test("gemini ask_user renders question and options inside one source block", () => {
-	const md = normalizeGeminiSession(jsonl([
+	const md = geminiAdapter.transcript(jsonl([
 		header,
 		{ id: "u-1", timestamp: "t", type: "user", content: [{ text: "어디에 둘까?" }] },
 		{
@@ -124,7 +114,7 @@ test("gemini ask_user renders question and options inside one source block", () 
 
 test("gemini meta reads summary, directories, and first real user utterance", () => {
 	const withDirs = jsonl([{ ...header, directories: ["/work/demo"] }, sessionContext, ...base.slice(2)]);
-	const meta = readGeminiSessionMeta(withDirs);
+	const meta = geminiAdapter.meta(withDirs);
 	assert.equal(meta.title, "로그인 버그 수정");
 	assert.equal(meta.cwd, "/work/demo");
 	assert.equal(meta.started, "2026-09-25T01:00:00.000Z");
@@ -132,19 +122,19 @@ test("gemini meta reads summary, directories, and first real user utterance", ()
 });
 
 test("gemini meta is null when the session has no real user utterance", () => {
-	assert.equal(readGeminiSessionMeta(jsonl([header, sessionContext])), null);
-	assert.equal(readGeminiSessionMeta(jsonl([header, { id: "u", timestamp: "t", type: "user", content: [{ text: "/help" }] }])), null);
+	assert.equal(geminiAdapter.meta(jsonl([header, sessionContext])), null);
+	assert.equal(geminiAdapter.meta(jsonl([header, { id: "u", timestamp: "t", type: "user", content: [{ text: "/help" }] }])), null);
 });
 
 test("gemini transcript yields citable sources", () => {
-	const md = normalizeGeminiSession(jsonl(base), "gemini:test/session.jsonl");
+	const md = geminiAdapter.transcript(jsonl(base), "gemini:test/session.jsonl");
 	const { sources } = prepareEvidence(md, "gemini:test/session.jsonl");
 	assert.ok(sources.size > 0);
 	assert.ok([...sources.values()].some((s) => s.text.includes("로그인 버그를 고쳐줘")));
 });
 
 test("gemini events extract user, assistant, question, and error", () => {
-	const entries = parseGeminiLines(jsonl([
+	const events = geminiAdapter.events(jsonl([
 		...base,
 		{
 			id: "g-2", timestamp: "t", type: "gemini", content: "",
@@ -154,7 +144,6 @@ test("gemini events extract user, assistant, question, and error", () => {
 			}],
 		},
 	]));
-	const events = extractGeminiEvents(entries);
 	const kinds = events.map((e) => e.kind);
 	assert.ok(kinds.includes("user"));
 	assert.ok(kinds.includes("assistant"));
@@ -167,7 +156,7 @@ test("gemini events extract user, assistant, question, and error", () => {
 });
 
 test("gemini $rewindTo drops messages from that id on", () => {
-	const md = normalizeGeminiSession(jsonl([
+	const md = geminiAdapter.transcript(jsonl([
 		header,
 		{ id: "u-1", timestamp: "t", type: "user", content: [{ text: "첫 질문" }] },
 		{ id: "g-1", timestamp: "t", type: "gemini", content: [{ text: "첫 답" }] },
@@ -182,7 +171,7 @@ test("gemini $rewindTo drops messages from that id on", () => {
 });
 
 test("gemini $set.messages checkpoint replaces earlier messages", () => {
-	const md = normalizeGeminiSession(jsonl([
+	const md = geminiAdapter.transcript(jsonl([
 		header,
 		{ id: "u-1", timestamp: "t", type: "user", content: [{ text: "옛날 질문" }] },
 		{ $set: { messages: [{ id: "u-9", timestamp: "t", type: "user", content: [{ text: "체크포인트 질문" }] }] } },
@@ -191,16 +180,20 @@ test("gemini $set.messages checkpoint replaces earlier messages", () => {
 	assert.ok(md.includes("체크포인트 질문"));
 });
 
-test("readGeminiProjectRoot finds the marker beside the chats dir", () => {
-	const root = mkdtempSync(join(tmpdir(), "gemini-proj-"));
-	mkdirSync(join(root, "chats"), { recursive: true });
-	writeFileSync(join(root, ".project_root"), "/work/demo\n");
-	const session = join(root, "chats", "session-2026-09-25T01-00-abcdef12.jsonl");
-	writeFileSync(session, jsonl(base));
-	assert.equal(readGeminiProjectRoot(session), "/work/demo");
-	// 서브에이전트 세션은 chats/<parentId>/ 아래에 있다
-	mkdirSync(join(root, "chats", "parent-session-id"), { recursive: true });
-	const sub = join(root, "chats", "parent-session-id", "child-id.jsonl");
-	writeFileSync(sub, jsonl(base));
-	assert.equal(readGeminiProjectRoot(sub), "/work/demo");
+test("gemini session file through the adapter: working folder from .project_root, whole file and a cut mid-line", async (t) => {
+	const files = { ".gemini/tmp/demo/.project_root": "/work/demo\n" };
+	const file = await sessionFixture(t, geminiAdapter, "demo/chats/session-2026-09-25T01-00-abcdef12.jsonl", base, files);
+	assert.deepEqual(file.meta, { title: "로그인 버그 수정", cwd: "/work/demo", started: "2026-09-25T01:00:00.000Z", first: "로그인 버그를 고쳐줘" });
+	assert.ok(file.transcript.startsWith(`# 로그인 버그 수정\n\n- 원본: ${file.path}\n- 작업 폴더: /work/demo\n- 시작: 2026-09-25T01:00:00.000Z\n`));
+	assert.deepEqual(file.events.map((e) => e.kind), ["user", "assistant", "error"]);
+	// 사용자 발화 줄 가운데서 자르면 꼬리는 그다음 답부터, 머리에는 진짜 발화가 없어 숨긴다.
+	const cut = await file.cutAt(2);
+	assert.deepEqual(cut.events, file.events.slice(1));
+	assert.equal(cut.meta, null);
+	// 제목($set) 줄이 잘린 머리는 아직 제목이 없다.
+	assert.equal((await file.cutAt(4)).meta.title, "(제목 없음)");
+	// 서브에이전트 세션(chats/<parentId>/)도 두 단계 위의 표시 파일을 쓴다.
+	const sub = await sessionFixture(t, geminiAdapter, "demo/chats/parent-session-id/child-id.jsonl", base, files);
+	assert.equal(sub.meta.cwd, "/work/demo");
+	assert.match(sub.transcript, /^- 작업 폴더: \/work\/demo$/m);
 });

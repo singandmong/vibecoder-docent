@@ -1,11 +1,10 @@
 #!/usr/bin/env node
-// Codex CLI 세션 jsonl (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl) → 사람이 읽는 전사 markdown.
+// Codex CLI 세션 adapter (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl) → 목록 메타 / 전사 markdown / 사건 카드 후보.
 // 출력 모양은 transcript-omp.mjs 와 같다. 도슨트는 둘을 구분하지 않는다.
 // CLI:    scripts/transcript-codex.mjs <session.jsonl> [out.md]
-// module: import { normalizeCodexSession } from "./transcript-codex.mjs"
-import { readFileSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+// module: import { codexAdapter } from "./transcript-codex.mjs"
 import { askQuestionLines, errorSummary } from "./event-text.mjs";
+import { jsonLines, transcriptCli, transcriptHeader } from "./transcript-jsonl.mjs";
 import { sourceWriter } from "./transcript-source.mjs";
 
 const ERROR_LINES = 8;
@@ -13,19 +12,6 @@ const USER_MAX = 4000;
 const TITLE_MAX = 60;
 const FIRST_MAX = 140;
 const EVENT_HEAD = 600;
-
-export const parseCodexLines = (jsonl) => {
-	const out = [];
-	for (const line of jsonl.split("\n")) {
-		if (!line) continue;
-		try {
-			out.push(JSON.parse(line));
-		} catch {
-			// 잘린 줄 무시
-		}
-	}
-	return out;
-};
 
 const clip = (s, max) => (s.length > max ? `${s.slice(0, max)}\n…(잘림)` : s);
 
@@ -132,9 +118,8 @@ const isErrorOutput = (output) => {
 
 const isAsk = (call) => call.name === "request_user_input" || call.name === "request_user_input_async";
 
-/** jsonl 본문을 전사 markdown 으로. `source` 는 헤더에 적을 원본 표시. */
-export function normalizeCodexSession(jsonl, source = "") {
-	const entries = parseCodexLines(jsonl);
+/** 엔트리 목록을 전사 markdown 으로. `source` 는 헤더에 적을 원본 표시. */
+function transcriptOf(entries, source) {
 	const meta = entries.find((e) => e.type === "session_meta")?.payload ?? {};
 	const mark = sourceWriter(`codex:${meta.session_id ?? meta.id ?? ""}`);
 	const results = new Map();
@@ -161,7 +146,7 @@ export function normalizeCodexSession(jsonl, source = "") {
 
 	const first = firstUserText(entries);
 	const title = first ? clip(first.split("\n")[0].replace(/\s+/g, " "), TITLE_MAX).replace("\n…(잘림)", "…") : "(제목 없음)";
-	const out = [`# ${title}`, "", `- 원본: ${source}`, `- 작업 폴더: ${meta.cwd ?? "?"}`, `- 시작: ${meta.timestamp ?? entries[0]?.timestamp ?? "?"}`, ""];
+	const out = transcriptHeader({ title, source, cwd: meta.cwd, started: meta.timestamp ?? entries[0]?.timestamp });
 	let lastRole = null;
 	const section = (role) => {
 		if (role !== lastRole) out.push("", `## ${role}`, "");
@@ -217,12 +202,11 @@ const firstUserText = (entries) => {
 	return null;
 };
 
-/** 세션 파일 머리(session_meta + 첫 사용자 발화)만 읽어 목록용 메타를 뽑는다. */
-export function readCodexSessionMeta(head) {
-	const entries = parseCodexLines(head);
+/** 세션 파일 머리(session_meta + 첫 사용자 발화)만 읽어 목록용 메타를 뽑는다. 사용자 발화 없는 세션은 숨김(null). */
+function sessionMeta(entries) {
 	const meta = entries.find((e) => e.type === "session_meta")?.payload ?? null;
 	const first = firstUserText(entries);
-	if (!first) return null; // 사용자 발화 없는 세션은 숨김
+	if (!first) return null;
 	const flat = first.replace(/\s+/g, " ").trim();
 	const title = clip(flat, TITLE_MAX).replace("\n…(잘림)", "…");
 	return {
@@ -233,8 +217,8 @@ export function readCodexSessionMeta(head) {
 	};
 }
 
-/** 새로 추가된 엔트리에서 라이브 이벤트를 뽑는다. {kind, text, options?} */
-export function extractCodexEvents(entries) {
+/** 엔트리에서 사건 카드 후보를 뽑는다. {kind, text, options?} */
+function eventsOf(entries) {
 	const out = [];
 	for (const e of entries) {
 		const p = e.payload;
@@ -260,15 +244,24 @@ export function extractCodexEvents(entries) {
 	return out;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-	const [, , input, output] = process.argv;
-	if (!input) {
-		console.error("usage: transcript-codex.mjs <session.jsonl> [out.md]");
-		process.exit(2);
-	}
-	const md = normalizeCodexSession(readFileSync(input, "utf8"), input);
-	if (output) {
-		writeFileSync(output, md);
-		console.error(`wrote ${output} (${md.length} chars)`);
-	} else process.stdout.write(md);
-}
+export const codexAdapter = {
+	id: "codex",
+	dir: ".codex/sessions",
+	depth: 3, // YYYY/MM/DD/rollout-*.jsonl
+	match: /^rollout-.*\.jsonl$/,
+	headBytes: 512 * 1024, // session_meta 에 긴 기본 지시문이 붙는다
+	/** 목록 메타 {title, cwd, started, first}. 숨길 세션이면 null. */
+	meta(head) {
+		return sessionMeta([...jsonLines(head)]);
+	},
+	/** 전사 markdown. `path` 는 헤더의 원본 표시. */
+	transcript(text, path = "") {
+		return transcriptOf([...jsonLines(text)], path);
+	},
+	/** 새로 끝난 줄들에서 사건 카드 후보. */
+	events(chunk) {
+		return eventsOf(jsonLines(chunk));
+	},
+};
+
+await transcriptCli(import.meta.url, codexAdapter);

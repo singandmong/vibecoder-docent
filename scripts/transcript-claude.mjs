@@ -1,14 +1,13 @@
 #!/usr/bin/env node
-// Claude Code 세션 jsonl (~/.claude/projects/<dir>/<id>.jsonl) → 사람이 읽는 전사 markdown.
+// Claude Code 세션 adapter (~/.claude/projects/<dir>/<id>.jsonl) → 목록 메타 / 전사 markdown / 사건 카드 후보.
 // 출력 모양은 transcript-omp.mjs 와 같다. 도슨트는 둘을 구분하지 않는다.
 // 서브에이전트 전사(<dir>/<id>/subagents/**/agent-*.jsonl)는 본 전사 안에 접어 넣는다 (ADR 0013).
 // CLI:    scripts/transcript-claude.mjs <session.jsonl> [out.md]
-// module: import { normalizeClaudeSession, readClaudeSessionMeta, readClaudeSubagents } from "./transcript-claude.mjs"
-import { readFileSync, writeFileSync } from "node:fs";
+// module: import { claudeAdapter } from "./transcript-claude.mjs"
 import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
 import { askQuestionLines, errorSummary } from "./event-text.mjs";
+import { jsonLines, transcriptCli, transcriptHeader } from "./transcript-jsonl.mjs";
 import { boundSourceBlocks, sourceWriter } from "./transcript-source.mjs";
 
 const ERROR_LINES = 8;
@@ -20,18 +19,7 @@ const SUB_TEXT_MAX = 400; // 서브에이전트 발화 하나
 const SUB_MAX = 8000; // 서브에이전트 블록 하나. 넘치면 가운데를 줄인다
 const SUB_HEAD = 3000;
 const SUB_TAIL = 4000;
-export const parseClaudeLines = (jsonl) => {
-	const out = [];
-	for (const line of jsonl.split("\n")) {
-		if (!line) continue;
-		try {
-			out.push(JSON.parse(line));
-		} catch {
-			// 잘린 줄 무시
-		}
-	}
-	return out;
-};
+const FIRST_MAX = 140;
 
 const blockText = (content) =>
 	typeof content === "string"
@@ -60,20 +48,20 @@ const firstUserText = (entries) => {
 	return null;
 };
 
-export function readClaudeSessionMeta(jsonl) {
-	const entries = parseClaudeLines(jsonl);
+/** 목록 메타. 사용자 발화가 없으면 title 은 "(제목 없음)", first 는 null. */
+function sessionMeta(entries) {
 	const withCwd = entries.find((e) => e.cwd);
 	const first = firstUserText(entries);
 	const title = first ? clip(first.split("\n")[0].replace(/^<command-name>(.*?)<\/command-name>.*/s, "$1"), TITLE_MAX).replace("\n…(잘림)", "…") : "(제목 없음)";
 	const flat = first ? first.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "";
-	return { title, cwd: withCwd?.cwd ?? null, started: withCwd?.timestamp ?? entries[0]?.timestamp ?? null, first: flat ? (flat.length > 140 ? `${flat.slice(0, 140)}…` : flat) : null };
+	return { title, cwd: withCwd?.cwd ?? null, started: withCwd?.timestamp ?? entries[0]?.timestamp ?? null, first: flat ? (flat.length > FIRST_MAX ? `${flat.slice(0, FIRST_MAX)}…` : flat) : null };
 }
 
 /**
  * 세션 옆 폴더의 서브에이전트 전사를 읽는다. `<dir>/<sessionId>/subagents/**\/agent-<id>.jsonl` + `.meta.json`.
  * 폴더가 없으면 빈 배열. 각 항목: {id, jsonl, meta:{agentType, description, toolUseId, model}}.
  */
-export async function readClaudeSubagents(sessionPath) {
+async function readSubagents(sessionPath) {
 	const root = join(dirname(sessionPath), basename(sessionPath, ".jsonl"), "subagents");
 	const out = [];
 	const walk = async (dir) => {
@@ -98,7 +86,7 @@ export async function readClaudeSubagents(sessionPath) {
  * 서브에이전트 전사 파일들의 이름·크기·수정 시각 요약. 내용은 읽지 않는다.
  * 본 세션 파일이 그대로여도 서브에이전트가 진행되면 값이 바뀌어 정규화 캐시를 새로 만든다.
  */
-export async function claudeSubagentStamp(sessionPath) {
+async function subagentStamp(sessionPath) {
 	const root = join(dirname(sessionPath), basename(sessionPath, ".jsonl"), "subagents");
 	const parts = [];
 	const walk = async (dir) => {
@@ -143,7 +131,7 @@ const toolBlocks = (entry, call, results, mark, prefix = "") => {
 
 /** Embedded agents keep their own source identity without introducing user turn headings. */
 function subagentBlock(sub, namespace) {
-	const entries = parseClaudeLines(sub.jsonl);
+	const entries = [...jsonLines(sub.jsonl)];
 	const results = toolResults(entries);
 	const { agentType, description, model } = sub.meta;
 	const who = [agentType ?? "서브에이전트", model ? `(${model})` : ""].join("");
@@ -185,11 +173,12 @@ const firstTimestamp = (jsonl) => {
 /**
  * @param {string} jsonl 본 세션
  * @param {string} source 헤더에 적을 원본 표시
- * @param {Awaited<ReturnType<typeof readClaudeSubagents>>} subagents 접어 넣을 서브에이전트. `Agent` 호출에 매인 것(meta.toolUseId)은 그 호출 줄 아래에,
+ * @param {Awaited<ReturnType<typeof readSubagents>>} subagents 접어 넣을 서브에이전트. `Agent` 호출에 매인 것(meta.toolUseId)은 그 호출 줄 아래에,
  *   나머지(워크플로 등)는 시작 시각 순으로 본 전사 사이에 끼운다.
  */
-export function normalizeClaudeSession(jsonl, source = "", subagents = []) {
-	const entries = parseClaudeLines(jsonl).filter((e) => !e.isSidechain);
+function transcriptOf(jsonl, source, subagents) {
+	const all = [...jsonLines(jsonl)];
+	const entries = all.filter((e) => !e.isSidechain);
 	const results = toolResults(entries);
 	const namespace = `claude:${entries.find((entry) => entry.sessionId)?.sessionId ?? ""}`;
 	const mark = sourceWriter(namespace);
@@ -204,8 +193,8 @@ export function normalizeClaudeSession(jsonl, source = "", subagents = []) {
 	}
 	timed.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
 
-	const meta = readClaudeSessionMeta(jsonl);
-	const out = [`# ${meta.title}`, "", `- 원본: ${source}`, `- 작업 폴더: ${meta.cwd ?? "?"}`, `- 시작: ${meta.started ?? "?"}`, ""];
+	const meta = sessionMeta(all);
+	const out = transcriptHeader({ title: meta.title, source, cwd: meta.cwd, started: meta.started });
 
 	let lastRole = null;
 	const section = (role) => {
@@ -258,8 +247,8 @@ export function normalizeClaudeSession(jsonl, source = "", subagents = []) {
 
 const EVENT_HEAD = 600;
 
-/** 새로 추가된 엔트리에서 라이브 이벤트를 뽑는다. 사이드체인·메타 제외. */
-export function extractClaudeEvents(entries) {
+/** 엔트리에서 사건 카드 후보를 뽑는다. 사이드체인·메타 제외. */
+function eventsOf(entries) {
 	const out = [];
 	for (const e of entries) {
 		if (e.isSidechain) continue;
@@ -284,15 +273,25 @@ export function extractClaudeEvents(entries) {
 	return out;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-	const [, , input, output] = process.argv;
-	if (!input) {
-		console.error("usage: transcript-claude.mjs <session.jsonl> [out.md]");
-		process.exit(2);
-	}
-	const md = normalizeClaudeSession(readFileSync(input, "utf8"), input, await readClaudeSubagents(input));
-	if (output) {
-		writeFileSync(output, md);
-		console.error(`wrote ${output} (${md.length} chars)`);
-	} else process.stdout.write(md);
-}
+export const claudeAdapter = {
+	id: "claude",
+	dir: ".claude/projects",
+	headBytes: 256 * 1024, // 첫 사용자 발화 앞에 attachment 가 길게 붙을 수 있음
+	/** 목록 메타 {title, cwd, started, first}. 사용자 발화 없는 세션(로그인 등)은 숨김(null). */
+	meta(head) {
+		const entries = [...jsonLines(head)];
+		return firstUserText(entries) ? sessionMeta(entries) : null;
+	},
+	/** 전사 markdown. 세션 파일 옆 폴더의 서브에이전트 전사를 함께 읽는다. 경로가 없으면 본 전사만. */
+	async transcript(text, path = "") {
+		return transcriptOf(text, path, path ? await readSubagents(path) : []);
+	},
+	/** 새로 끝난 줄들에서 사건 카드 후보. */
+	events(chunk) {
+		return eventsOf(jsonLines(chunk));
+	},
+	/** 본 파일 밖에서 전사에 들어가는 서브에이전트 파일들의 변경 표시. 전사 캐시 기준에 들어간다. */
+	stamp: subagentStamp,
+};
+
+await transcriptCli(import.meta.url, claudeAdapter);

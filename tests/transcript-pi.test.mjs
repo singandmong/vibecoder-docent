@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { prepareEvidence } from "../app/evidence.mjs";
-import { extractPiEvents, normalizePiSession, parsePiLines, readPiSessionMeta } from "../scripts/transcript-pi.mjs";
-
-const jsonl = (entries) => entries.map((entry) => JSON.stringify(entry)).join("\n");
+import { piAdapter } from "../scripts/transcript-pi.mjs";
+import { jsonl, sessionFixture } from "./session-fixture.mjs";
 
 // pi-mono 세션 형식: 헤더 {type:"session", id, timestamp, cwd} + 엔트리 {type, id, parentId, timestamp}.
 // 이름은 헤더가 아니라 session_info 엔트리에, 모델은 {provider, modelId} 로 온다.
@@ -40,7 +39,7 @@ const base = [
 ];
 
 test("pi transcript shows user and assistant sections, tool call and result", () => {
-	const md = normalizePiSession(jsonl(base), "pi:--work--/session.jsonl");
+	const md = piAdapter.transcript(jsonl(base), "pi:--work--/session.jsonl");
 	assert.ok(md.includes("# 인증 리팩터링"));
 	assert.ok(md.includes("- 원본: pi:--work--/session.jsonl"));
 	assert.ok(md.includes("- 작업 폴더: /work/pi-proj"));
@@ -56,7 +55,7 @@ test("pi transcript shows user and assistant sections, tool call and result", ()
 });
 
 test("pi transcript shows tool errors and pending calls", () => {
-	const md = normalizePiSession(jsonl([
+	const md = piAdapter.transcript(jsonl([
 		base[0],
 		{
 			type: "message", id: "m-1", parentId: null, timestamp: "t",
@@ -85,7 +84,7 @@ test("pi transcript shows tool errors and pending calls", () => {
 });
 
 test("pi meta reads session_info name, cwd, and first user utterance", () => {
-	const meta = readPiSessionMeta(jsonl(base));
+	const meta = piAdapter.meta(jsonl(base));
 	assert.equal(meta.title, "인증 리팩터링");
 	assert.equal(meta.cwd, "/work/pi-proj");
 	assert.equal(meta.started, "2026-09-25T02:00:00.000Z");
@@ -93,28 +92,44 @@ test("pi meta reads session_info name, cwd, and first user utterance", () => {
 });
 
 test("pi meta is null without a user utterance", () => {
-	assert.equal(readPiSessionMeta(jsonl([base[0], base[1]])), null);
+	assert.equal(piAdapter.meta(jsonl([base[0], base[1]])), null);
 });
 
 test("pi transcript yields citable sources", () => {
-	const md = normalizePiSession(jsonl(base), "pi:test/session.jsonl");
+	const md = piAdapter.transcript(jsonl(base), "pi:test/session.jsonl");
 	const { sources } = prepareEvidence(md, "pi:test/session.jsonl");
 	assert.ok(sources.size > 0);
 	assert.ok([...sources.values()].some((s) => s.text.includes("세션 만료 버그를 봐줘")));
 });
 
 test("pi events extract user, assistant, and tool errors", () => {
-	const events = extractPiEvents(parsePiLines(jsonl([
+	const events = piAdapter.events(jsonl([
 		...base,
 		{
 			type: "message", id: "m-4", parentId: "cp-1", timestamp: "t",
 			message: { role: "toolResult", toolCallId: "tc-9", toolName: "bash", content: [{ type: "text", text: "fatal: not a git repository" }], isError: true, timestamp: 1 },
 		},
-	])));
+	]));
 	const kinds = events.map((e) => e.kind);
 	assert.ok(kinds.includes("user"));
 	assert.ok(kinds.includes("assistant"));
 	assert.ok(kinds.includes("error"));
 	const err = events.find((e) => e.kind === "error");
 	assert.ok(err.text.includes("fatal: not a git repository"));
+});
+
+test("pi session file through the adapter: whole file and a cut mid-line", async (t) => {
+	const file = await sessionFixture(t, piAdapter, "--work-pi-proj--/2026-09-25T02-00-00_pi-session-1.jsonl", base);
+	assert.deepEqual(file.meta, { title: "인증 리팩터링", cwd: "/work/pi-proj", started: "2026-09-25T02:00:00.000Z", first: "세션 만료 버그를 봐줘" });
+	assert.ok(file.transcript.startsWith(`# 인증 리팩터링\n\n- 원본: ${file.path}\n- 작업 폴더: /work/pi-proj\n- 시작: 2026-09-25T02:00:00.000Z\n`));
+	assert.ok(file.transcript.includes("(모델: anthropic/claude-sonnet-4-5)"));
+	assert.deepEqual(file.events, [
+		{ kind: "user", text: "세션 만료 버그를 봐줘" },
+		{ kind: "assistant", text: "토큰 갱신 코드를 확인할게요.", ts: "2026-09-25T02:00:20.000Z" },
+	]);
+	// 사용자 발화 줄 가운데서 자르면 꼬리는 답부터, 머리는 발화가 없어 숨긴다.
+	const cut = await file.cutAt(2);
+	assert.deepEqual(cut.events, file.events.slice(1));
+	assert.equal(cut.meta, null);
+	assert.deepEqual((await file.cutAt(3)).meta, file.meta);
 });

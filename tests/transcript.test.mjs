@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeOmpSession } from "../scripts/transcript-omp.mjs";
-import { normalizeClaudeSession } from "../scripts/transcript-claude.mjs";
+import { ompAdapter } from "../scripts/transcript-omp.mjs";
+import { claudeAdapter } from "../scripts/transcript-claude.mjs";
 import { prepareEvidence } from "../app/evidence.mjs";
 
 const jsonl = (entries) => entries.map((entry) => JSON.stringify(entry)).join("\n");
@@ -73,15 +73,15 @@ const assertAskVisible = (md, sessionId, phrases) => {
 };
 
 test("omp ask call keeps question text and options inside its source block", () => {
-	assertAskVisible(normalizeOmpSession(jsonl(ompAsk), "omp:test/session.jsonl"), "omp:test/session.jsonl", [
+	assertAskVisible(ompAdapter.transcript(jsonl(ompAsk), "omp:test/session.jsonl"), "omp:test/session.jsonl", [
 		"결과를 어디에 저장할까요?", "어떤 형식으로보낼까요?",
 		"docs 폴더", "문서와 함께 둔다", "루트", "프로젝트 맨 위에 둔다",
 		"markdown", "읽기 쉬운 문서", "json",
 	]);
 });
 
-test("claude AskUserQuestion keeps question text and options inside its source block", () => {
-	assertAskVisible(normalizeClaudeSession(jsonl(claudeAsk), "claude:test/session.jsonl"), "claude:test/session.jsonl", [
+test("claude AskUserQuestion keeps question text and options inside its source block", async () => {
+	assertAskVisible(await claudeAdapter.transcript(jsonl(claudeAsk)), "claude:test/session.jsonl", [
 		"어느 브랜치에서 작업할까요?", "테스트를 돌릴까요?",
 		"main", "기본 브랜치", "feature/docent", "도슨트 작업 브랜치",
 		"돌린다", "전체 테스트 실행",
@@ -92,7 +92,7 @@ test("answered ask still shows the user answer under the call", () => {
 	const answered = [...ompAsk, {
 		type: "message", id: "r", message: { role: "toolResult", toolCallId: "ask-1", content: "docs 폴더에 markdown으로" },
 	}];
-	const md = normalizeOmpSession(jsonl(answered));
+	const md = ompAdapter.transcript(jsonl(answered));
 	assert.match(md, /⇒ ask 사용자 답:\n {2}docs 폴더에 markdown으로/);
 	assert.ok(md.includes("결과를 어디에 저장할까요?"));
 });

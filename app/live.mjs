@@ -1,6 +1,7 @@
-// 세션 파일을 폴링해 새 줄만 읽고 이벤트로 바꾼다. SSE 연결 하나당 watcher 하나.
-import { open, stat } from "node:fs/promises";
+// 세션 파일을 폴링해 새 줄만 읽고 사건 카드로 바꾼다. SSE 연결 하나당 watcher 하나.
+// 바이트 읽기는 session-file.mjs, 줄 해석은 호스트 adapter 의 events 가 맡는다.
 import { EVENT_QUESTIONS, jevEnabled, judge } from "./jev.mjs";
+import { followFile } from "./session-file.mjs";
 
 const POLL_MS = 1000;
 const REPLAY_BYTES = 512 * 1024; // 구독 시 꼬리에서 다시 보여 줄 범위. 도구 결과가 커서 64KB 로는 이벤트가 거의 안 잡힌다
@@ -25,21 +26,10 @@ async function filterEvent(ev, warnReduced) {
 	return { ...ev, sub: category, by: "jev", p: probability };
 }
 
-/** 파일 꼬리의 최근 이벤트를 past 표시로 먼저 보낸다 (ADR 0012). */
-async function replay(path, size, provider, send, warnReduced) {
-	const start = Math.max(0, size - REPLAY_BYTES);
-	const fh = await open(path, "r");
-	let chunk;
-	try {
-		const buf = Buffer.alloc(size - start);
-		const { bytesRead } = await fh.read(buf, 0, buf.length, start);
-		chunk = buf.subarray(0, bytesRead).toString("utf8");
-	} finally {
-		await fh.close();
-	}
-	if (start > 0) chunk = chunk.slice(chunk.indexOf("\n") + 1); // 잘린 첫 줄 버림
+/** 파일 꼬리의 최근 사건 카드를 past 표시로 먼저 보낸다 (ADR 0012). */
+async function replay(tail, adapter, send, warnReduced) {
 	const kept = [];
-	for (const ev of provider.events(provider.parse(chunk))) {
+	for (const ev of adapter.events(tail)) {
 		const selected = await filterEvent(ev, warnReduced);
 		if (selected) kept.push(selected);
 	}
@@ -49,13 +39,13 @@ async function replay(path, size, provider, send, warnReduced) {
 
 /**
  * @param {string} path 세션 jsonl
- * @param {{parse:(s:string)=>any[], events:(entries:any[])=>any[]}} provider
+ * @param {{events:(chunk:string)=>object[]}} adapter 새로 끝난 줄들 → 사건 카드 후보
  * @param {(ev:object)=>void} send
  * @returns {() => void} stop
  */
-export function watchSession(path, provider, send) {
-	let offset = -1; // -1: 첫 stat 에서 꼬리를 재생하고 EOF 로 맞춤
-	let remainder = Buffer.alloc(0); // 아직 줄이 끝나지 않은 바이트. 글자 중간에서 잘려도 다음 읽기와 합쳐 디코딩한다
+export function watchSession(path, adapter, send) {
+	const file = followFile(path);
+	let started = false; // 첫 읽기에서 꼬리를 재생하고 파일 끝부터 이어 읽는다
 	let stopped = false;
 	let busy = false;
 	let reducedReported = false;
@@ -75,35 +65,17 @@ export function watchSession(path, provider, send) {
 		busy = true;
 		if (!jevEnabled) warnReduced();
 		try {
-			const st = await stat(path).catch(() => null);
-			if (!st) return;
-			if (offset < 0) {
-				offset = st.size;
-				await replay(path, st.size, provider, send, warnReduced);
+			if (!started) {
+				const tail = await file.start(REPLAY_BYTES);
+				if (tail === null) return;
+				started = true;
+				await replay(tail, adapter, send, warnReduced);
 				send({ kind: "hello", text: "이 세션을 지켜보고 있어요", at: new Date().toISOString() });
 				return;
 			}
-			if (st.size < offset) {
-				offset = 0; // 파일이 새로 쓰였음
-				remainder = Buffer.alloc(0);
-			}
-			if (st.size === offset) return;
-			const fh = await open(path, "r");
-			let chunk;
-			try {
-				const buf = Buffer.alloc(st.size - offset);
-				const { bytesRead } = await fh.read(buf, 0, buf.length, offset);
-				chunk = Buffer.concat([remainder, buf.subarray(0, bytesRead)]);
-				offset += bytesRead;
-			} finally {
-				await fh.close();
-			}
-			// 줄바꿈 바이트(0x0a)는 여러 바이트 글자 안에 나오지 않으므로 여기서 자르면 글자가 깨지지 않는다.
-			const nl = chunk.lastIndexOf(0x0a);
-			remainder = nl >= 0 ? chunk.subarray(nl + 1) : chunk;
-			const complete = nl >= 0 ? chunk.subarray(0, nl + 1).toString("utf8") : "";
+			const complete = await file.next();
 			if (!complete) return;
-			for (const ev of provider.events(provider.parse(complete))) {
+			for (const ev of adapter.events(complete)) {
 				const selected = await filterEvent(ev, warnReduced);
 				if (selected) send({ ...selected, at: new Date().toISOString() });
 			}

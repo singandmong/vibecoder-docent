@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { prepareEvidence } from "../app/evidence.mjs";
-import { extractCodexEvents, normalizeCodexSession, parseCodexLines, readCodexSessionMeta } from "../scripts/transcript-codex.mjs";
-
-const jsonl = (entries) => entries.map((entry) => JSON.stringify(entry)).join("\n");
+import { codexAdapter } from "../scripts/transcript-codex.mjs";
+import { jsonl, sessionFixture } from "./session-fixture.mjs";
 
 const sessionMeta = {
 	type: "session_meta",
@@ -62,7 +61,7 @@ const fixture = [
 ];
 
 test("codex normalize renders header, roles, tool call and result lines", () => {
-	const md = normalizeCodexSession(jsonl(fixture), "codex:test/rollout.jsonl");
+	const md = codexAdapter.transcript(jsonl(fixture), "codex:test/rollout.jsonl");
 	assert.match(md, /^# 로그 파일에서 에러 찾아줘/);
 	assert.ok(md.includes("- 원본: codex:test/rollout.jsonl"));
 	assert.ok(md.includes("- 작업 폴더: /tmp/work"));
@@ -81,7 +80,7 @@ test("codex normalize renders header, roles, tool call and result lines", () => 
 });
 
 test("codex normalize marks sources citable by prepareEvidence", () => {
-	const md = normalizeCodexSession(jsonl(fixture), "codex:test/rollout.jsonl");
+	const md = codexAdapter.transcript(jsonl(fixture), "codex:test/rollout.jsonl");
 	const { sources } = prepareEvidence(md, "codex:test/rollout.jsonl");
 	assert.ok(sources.size > 0);
 	const utterance = [...sources.values()].find((s) => s.text.includes("로그 파일에서 에러 찾아줘"));
@@ -89,7 +88,7 @@ test("codex normalize marks sources citable by prepareEvidence", () => {
 });
 
 test("codex meta reads title, cwd, started, first from head", () => {
-	const meta = readCodexSessionMeta(jsonl(fixture));
+	const meta = codexAdapter.meta(jsonl(fixture));
 	assert.equal(meta.title, "로그 파일에서 에러 찾아줘");
 	assert.equal(meta.cwd, "/tmp/work");
 	assert.equal(meta.started, "2026-09-20T00:00:00Z");
@@ -98,7 +97,7 @@ test("codex meta reads title, cwd, started, first from head", () => {
 
 test("codex meta returns null without a real user utterance", () => {
 	const onlyContext = [sessionMeta, userMessage("", [{ type: "input_text", text: "<environment_context><cwd>/tmp</cwd></environment_context>" }])];
-	assert.equal(readCodexSessionMeta(jsonl(onlyContext)), null);
+	assert.equal(codexAdapter.meta(jsonl(onlyContext)), null);
 });
 
 test("codex meta unwraps files-mentioned wrapper to the request", () => {
@@ -106,13 +105,13 @@ test("codex meta unwraps files-mentioned wrapper to the request", () => {
 		sessionMeta,
 		userMessage("# Files mentioned by the user:\n\n## spec.md: /tmp/spec.md\n\n## My request:\n이 문서 요약해줘"),
 	];
-	const meta = readCodexSessionMeta(jsonl(wrapped));
+	const meta = codexAdapter.meta(jsonl(wrapped));
 	assert.equal(meta.first, "이 문서 요약해줘");
 	assert.equal(meta.title, "이 문서 요약해줘");
 });
 
 test("codex events extract user, assistant, error and done", () => {
-	const events = extractCodexEvents(parseCodexLines(jsonl(fixture)));
+	const events = codexAdapter.events(jsonl(fixture));
 	const kinds = events.map((e) => e.kind);
 	assert.deepEqual(kinds, ["user", "assistant", "error", "assistant", "done"]);
 	assert.equal(events[0].text, "로그 파일에서 에러 찾아줘");
@@ -135,19 +134,19 @@ test("codex request_user_input renders question and options", () => {
 		},
 		{ type: "response_item", payload: { type: "function_call_output", id: "fco-ask", call_id: "call-ask", output: '{"accepted":true}' } },
 	];
-	const md = normalizeCodexSession(jsonl(ask), "codex:test/ask.jsonl");
+	const md = codexAdapter.transcript(jsonl(ask), "codex:test/ask.jsonl");
 	assert.ok(md.includes("→ request_user_input_async("));
 	assert.ok(md.includes("어느 기기에서 로그인했나요?"));
 	assert.ok(md.includes("맥북"));
 	assert.ok(md.includes("다른 기기"));
-	const events = extractCodexEvents(parseCodexLines(jsonl(ask)));
+	const events = codexAdapter.events(jsonl(ask));
 	const q = events.find((e) => e.kind === "question");
 	assert.equal(q.text, "어느 기기에서 로그인했나요?");
 	assert.deepEqual(q.options.map((o) => o.label), ["맥북", "맥미니", "다른 기기"]);
 });
 
 test("codex compacted and aborted render as system lines", () => {
-	const md = normalizeCodexSession(
+	const md = codexAdapter.transcript(
 		jsonl([
 			sessionMeta,
 			userMessage("작업해줘"),
@@ -160,11 +159,19 @@ test("codex compacted and aborted render as system lines", () => {
 });
 
 test("codex tool call without result shows pending marker", () => {
-	const md = normalizeCodexSession(jsonl([sessionMeta, userMessage("확인해줘"), execCall("call-x", "ls")]));
+	const md = codexAdapter.transcript(jsonl([sessionMeta, userMessage("확인해줘"), execCall("call-x", "ls")]));
 	assert.ok(md.includes("(결과 없음)"));
 });
 
-test("codex parse skips broken lines", () => {
-	const entries = parseCodexLines(`${JSON.stringify(sessionMeta)}\n{"broken": \n${JSON.stringify(userMessage("안녕"))}`);
-	assert.equal(entries.length, 2);
+test("codex session file through the adapter: whole file and a cut mid-line", async (t) => {
+	const file = await sessionFixture(t, codexAdapter, "2026/09/20/rollout-2026-09-20-x.jsonl", fixture);
+	assert.deepEqual(file.meta, { title: "로그 파일에서 에러 찾아줘", cwd: "/tmp/work", started: "2026-09-20T00:00:00Z", first: "로그 파일에서 에러 찾아줘" });
+	assert.ok(file.transcript.startsWith(`# 로그 파일에서 에러 찾아줘\n\n- 원본: ${file.path}\n- 작업 폴더: /tmp/work\n- 시작: 2026-09-20T00:00:00Z\n`));
+	assert.deepEqual(file.events.map((e) => e.kind), ["user", "assistant", "error", "assistant", "done"]);
+	// 실패한 도구 호출(8번째 줄) 가운데서 자르면 꼬리는 그 결과부터, 머리는 이미 첫 발화를 담고 있다.
+	const cut = await file.cutAt(8);
+	assert.deepEqual(cut.meta, file.meta);
+	assert.deepEqual(cut.events, file.events.slice(2));
+	// 첫 발화 줄에서 자른 머리는 아직 발화가 없어 목록에서 숨긴다.
+	assert.equal((await file.cutAt(3)).meta, null);
 });

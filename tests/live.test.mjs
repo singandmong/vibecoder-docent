@@ -13,10 +13,7 @@ if (originalKey === undefined) delete process.env.TYPESAFE_API_KEY;
 else process.env.TYPESAFE_API_KEY = originalKey;
 
 const jsonl = (events) => events.map((event) => JSON.stringify(event)).join("\n") + "\n";
-const provider = {
-	parse: (raw) => raw.split("\n").filter(Boolean).map((line) => JSON.parse(line)),
-	events: (entries) => entries,
-};
+const adapter = { events: (chunk) => chunk.split("\n").filter(Boolean).map((line) => JSON.parse(line)) };
 const messages = (events) => events.filter((event) => event.kind !== "hello" && event.kind !== "warn");
 async function waitUntil(predicate) {
 	const deadline = Date.now() + 5000;
@@ -32,7 +29,7 @@ async function startSession(t, initial) {
 	t.after(async () => { stop?.(); await rm(directory, { recursive: true, force: true }); });
 	await writeFile(path, jsonl(initial));
 	const sent = [];
-	stop = watchSession(path, provider, (event) => sent.push(event));
+	stop = watchSession(path, adapter, (event) => sent.push(event));
 	await waitUntil(() => sent.some((event) => event.kind === "hello"));
 	return { sent, append: (events) => appendFile(path, jsonl(events)) };
 }

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// omp 세션 jsonl → 사람이 읽는 전사 markdown.
+// omp 세션 adapter. 세션 파일(~/.omp/agent/sessions/<폴더>/<id>.jsonl) → 목록 메타 / 전사 markdown / 사건 카드 후보.
+// pi 도 엔트리 모양이 같아 ompShapedAdapter 를 쓴다(transcript-pi.mjs).
 // CLI:    scripts/transcript-omp.mjs <session.jsonl> [out.md]   (out 생략 시 stdout)
-// module: import { normalizeOmpSession } from "./transcript-omp.mjs"
-import { readFileSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+// module: import { ompAdapter } from "./transcript-omp.mjs"
 import { askQuestionLines, errorSummary } from "./event-text.mjs";
+import { jsonLines, transcriptCli, transcriptHeader } from "./transcript-jsonl.mjs";
 import { sourceWriter } from "./transcript-source.mjs";
 
 const ERROR_LINES = 8;
@@ -29,9 +29,8 @@ const summarizeArgs = (args) => {
 	return first ? clip(first.replace(/\s+/g, " "), 100) : "";
 };
 
-/** jsonl 본문을 전사 markdown 으로. `source` 는 헤더에 적을 원본 표시. */
-export function normalizeOmpSession(jsonl, source = "") {
-	const entries = parseOmpLines(jsonl);
+/** 엔트리 목록을 전사 markdown 으로. `source` 는 헤더에 적을 원본 표시. */
+function transcriptOf(entries, source) {
 	const header = entries.find((e) => e.type === "session");
 	const mark = sourceWriter(`omp:${header?.id ?? header?.sessionId ?? ""}`, header?.agentId ?? null);
 	const results = new Map();
@@ -57,7 +56,7 @@ export function normalizeOmpSession(jsonl, source = "") {
 	};
 
 	const title = entries.find((e) => e.type === "title")?.title ?? header?.title ?? "(제목 없음)";
-	const out = [`# ${title}`, "", `- 원본: ${source}`, `- 작업 폴더: ${header?.cwd ?? "?"}`, `- 시작: ${header?.timestamp ?? "?"}`, ""];
+	const out = transcriptHeader({ title, source, cwd: header?.cwd, started: header?.timestamp });
 	let lastRole = null;
 	const section = (role) => {
 		if (role !== lastRole) out.push("", `## ${role}`, "");
@@ -101,23 +100,17 @@ export function normalizeOmpSession(jsonl, source = "") {
 
 const FIRST_MAX = 140;
 
-/** 세션 파일 머리(title/session 엔트리 + 첫 사용자 발화)만 읽어 목록용 메타를 뽑는다. */
-export function readOmpSessionMeta(jsonl) {
+/** 세션 파일 머리(title/session 엔트리 + 첫 사용자 발화)만 읽어 목록용 메타를 뽑는다. 셋이 다 차면 더 읽지 않는다. */
+function sessionMeta(entries) {
 	let title = null;
 	let header = null;
 	let first = null;
-	for (const line of jsonl.split("\n")) {
-		if (!line) continue;
-		try {
-			const e = JSON.parse(line);
-			if (e.type === "title") title = e.title;
-			else if (e.type === "session") header = e;
-			else if (e.type === "message" && e.message?.role === "user" && !first) {
-				const t = text(e.message.content).replace(/\s+/g, " ").trim();
-				if (t) first = t.length > FIRST_MAX ? `${t.slice(0, FIRST_MAX)}…` : t;
-			}
-		} catch {
-			// 잘린 줄 무시
+	for (const e of entries) {
+		if (e.type === "title") title = e.title;
+		else if (e.type === "session") header = e;
+		else if (e.type === "message" && e.message?.role === "user" && !first) {
+			const t = text(e.message.content).replace(/\s+/g, " ").trim();
+			if (t) first = t.length > FIRST_MAX ? `${t.slice(0, FIRST_MAX)}…` : t;
 		}
 		if (title && header && first) break;
 	}
@@ -126,8 +119,8 @@ export function readOmpSessionMeta(jsonl) {
 
 const EVENT_HEAD = 600;
 
-/** 새로 추가된 엔트리에서 라이브 이벤트를 뽑는다. {kind, text, question?, options?} */
-export function extractOmpEvents(entries) {
+/** 엔트리에서 사건 카드 후보를 뽑는다. {kind, text, question?, options?} */
+function eventsOf(entries) {
 	const out = [];
 	for (const e of entries) {
 		const ts = e.timestamp ?? e.ts ?? null;
@@ -158,27 +151,31 @@ export function extractOmpEvents(entries) {
 	return out;
 }
 
-export function parseOmpLines(jsonl) {
-	const out = [];
-	for (const line of jsonl.split("\n")) {
-		if (!line) continue;
-		try {
-			out.push(JSON.parse(line));
-		} catch {
-			// 잘린 줄 무시
-		}
-	}
-	return out;
+/**
+ * omp 모양 엔트리를 쓰는 호스트의 adapter. `adapt` 는 줄 하나를 omp 엔트리 모양으로 바꾸고,
+ * `requireUser` 면 사용자 발화가 없는 세션을 목록에서 숨긴다.
+ */
+export function ompShapedAdapter({ id, dir, adapt, requireUser = false }) {
+	return {
+		id,
+		dir,
+		headBytes: 256 * 1024, // session_init 의 시스템 프롬프트 뒤에 첫 사용자 발화가 온다
+		/** 목록 메타 {title, cwd, started, first}. 숨길 세션이면 null. */
+		meta(head) {
+			const m = sessionMeta(jsonLines(head, adapt));
+			return requireUser && !m.first ? null : m;
+		},
+		/** 전사 markdown. `path` 는 헤더의 원본 표시. */
+		transcript(text, path = "") {
+			return transcriptOf([...jsonLines(text, adapt)], path);
+		},
+		/** 새로 끝난 줄들에서 사건 카드 후보. */
+		events(chunk) {
+			return eventsOf(jsonLines(chunk, adapt));
+		},
+	};
 }
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-	const [, , input, output] = process.argv;
-	if (!input) {
-		console.error("usage: transcript-omp.mjs <session.jsonl> [out.md]");
-		process.exit(2);
-	}
-	const md = normalizeOmpSession(readFileSync(input, "utf8"), input);
-	if (output) {
-		writeFileSync(output, md);
-		console.error(`wrote ${output} (${md.length} chars)`);
-	} else process.stdout.write(md);
-}
+
+export const ompAdapter = ompShapedAdapter({ id: "omp", dir: ".omp/agent/sessions" });
+
+await transcriptCli(import.meta.url, ompAdapter);
