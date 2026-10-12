@@ -2,7 +2,7 @@
 
 형식: [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/). 버전은 [SemVer](https://semver.org/lang/ko/). 0.x 동안은 minor 가 새 기능, patch 가 고침.
 
-## [Unreleased]
+## [0.22.0] — 2026-10-12
 
 ### 고침
 - 미리 설명이 도는 카드에 질문하거나 두 화면이 같은 스레드에 동시에 질문하면 뒤 질문이 `conversation is busy` 500으로 실패하고 앞 설명의 대화까지 끊기던 문제. 같은 스레드의 설명은 서버가 들어온 순서대로 하나씩 실행함 (ADR 0050).
