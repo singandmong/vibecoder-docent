@@ -12,15 +12,16 @@ app/jobs.mjs              설명 작업 레지스트리: 대기·분류·설명�
 app/prefetch.mjs          세션 감시기 공유·미리 설명 예약·10분 5개 상한 (ADR 0031)
 app/live.mjs              세션 폴링 → 질문·결과·계획만 선별, 재생에도 같은 기준 적용
 app/jev.mjs               TypeSafe Jev 의미 판정. 사용 불가 시 구조화 질문만 유지하고 제한 안내
-app/store.mjs             learning.json 원자적 저장, 기본 프로필의 기존 questions.jsonl 읽기
-app/learning.mjs          프로필·의미 분류 계획(전사 없이)·핵심 단어·설명 모드·학습 상태·관련 기억·요청 상태(시작·완료·실패·중단) (ADR 0014·0030)
+app/store.mjs             문답·요청 기록 module: learning.json 원자적 저장, 모든 입구에서 프로필 확인, 요청 키·문답 식별자, 요청 상태(시작·완료·실패·중단), 즐겨찾기, 기본 프로필의 기존 questions.jsonl 읽기 (ADR 0052)
+app/learning.mjs          프로필 설정·의미 분류 계획(전사 없이)·핵심 단어·학습 상태·관련 기억 (ADR 0014·0030)
+app/thread.mjs            스레드 식별자: 질문 대상 내용(공백 차이 무시)의 해시, "" 는 세션 전체 대화 (ADR 0022·0052)
 app/models.mjs            omp 채팅 모델 카탈로그·단가·정확한 selector 검증 (ADR 0016)
 app/evidence.mjs          소스 검증·근거 추출·원문 위치와 주변 맥락 해석 (ADR 0014)
 app/review.mjs            답 속 용어 링크용 용어집: 저장된 핵심 단어 + `용어(풀이)` 규칙 추출
 app/wiki.mjs              배운 내용 다시보기 용어 사전: 핵심 단어 검증·집계·옛 문답 일괄 추출 (ADR 0020)
 app/trim.mjs              긴 전사 줄이기: 120,000자 넘으면 앞 턴은 사용자 발화만, 최근 턴은 그대로 (ADR 0009)
 app/peers.mjs             원격 세션 목록·전사·라이브 제공자 (ADR 0011·0014)
-app/dialogue.mjs          질문 대상 검증, 서버 발급 스레드 식별자, 사건 카드의 질문 대상·미리 설명 요청문, 분류용 최근 대화 (ADR 0022·0028)
+app/dialogue.mjs          질문 대상 검증, 사건 카드의 질문 대상·미리 설명 요청문, 분류용 최근 대화 (ADR 0022·0028)
 app/slots.mjs             답 → {status, headline, explain, details[]}, Markdown 블록 보존 (ADR 0017)
 app/index.html            세션·작업 내용·카드별 대화·즐겨찾기·설정·배운 내용 다시보기·PiP. Streamdown 로컬 자산으로 Markdown 표시 (ADR 0015·0017)
 app/mobile.css           600px 이하 단일 화면 탐색, 터치와 화면 키보드 레이아웃

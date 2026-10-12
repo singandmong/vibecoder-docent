@@ -1,14 +1,17 @@
-// 기존 questions.jsonl 은 기본 프로필의 역사로 보존한다. 새 기록과 학습 상태는 한 번에 원자적으로 저장한다.
+// 문답·요청 기록 module (ADR 0052). 프로필마다 문답(질문 하나와 답 하나)과 설명 요청의 상태를 learning.json 에 원자적으로 저장한다.
+// 모든 입구가 프로필을 확인하고, 요청 키와 문답 식별자는 여기서만 만든다. 기존 questions.jsonl 은 기본 프로필의 역사로 보존한다.
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { rowKey } from "./wiki.mjs";
+import { httpError } from "./errors.mjs";
+import { threadKey, threadText } from "./thread.mjs";
 
 export const DOCENT_HOME = process.env.DOCENT_HOME ?? join(homedir(), ".docent");
 const LEGACY_FILE = join(DOCENT_HOME, "questions.jsonl");
 const STATE_FILE = join(DOCENT_HOME, "learning.json");
+const RUN_ID = randomUUID();
 let writes = Promise.resolve();
 
 const emptyState = () => ({
@@ -90,8 +93,25 @@ export function updateState(change) {
 	return next;
 }
 
+/** 저장 상태 안의 프로필. 없으면 404, 비었으면 400. */
+export function profileFrom(state, id) {
+	if (typeof id !== "string" || !id) throw httpError(400, "profileId 가 필요해요.");
+	const profile = state.profiles.find((p) => p.id === id);
+	if (!profile) throw httpError(404, "프로필을 찾을 수 없어요.");
+	return profile;
+}
+
+export function fingerprint(text) {
+	return createHash("sha256").update(text).digest("hex");
+}
+
+/** 저장 위치와 무관한 문답 식별자. 옛 questions.jsonl 줄은 시각과 세션으로 식별한다. */
+export const rowKey = (row) => row.recordId ?? row.id ?? `legacy:${row.ts}\n${row.sessionId}`;
+
+/** 프로필의 문답. `sessionId` 가 없으면 모든 세션. 시간순이고 각 문답에 스레드 식별자(`thread`)가 붙는다. */
 export async function history(sessionId, profileId = "default") {
 	const state = await readState();
+	profileFrom(state, profileId);
 	const rows = state.records.filter((row) => row.profileId === profileId && (!sessionId || row.sessionId === sessionId));
 	if (profileId === "default") {
 		let text;
@@ -120,6 +140,7 @@ export async function history(sessionId, profileId = "default") {
 /** 용어 추출 결과를 저장한다. 새 문답은 레코드에, 옛 questions.jsonl 줄은 원본을 고치지 않고 따로 보관한다. */
 export function saveKeywords(profileId, byId) {
 	return updateState((state) => {
+		profileFrom(state, profileId);
 		for (const [id, keywords] of Object.entries(byId)) {
 			const record = state.records.find((row) => row.profileId === profileId && rowKey(row) === id);
 			if (record) record.keywords = keywords;
@@ -129,23 +150,87 @@ export function saveKeywords(profileId, byId) {
 	});
 }
 
-/** 대화 스레드는 세션과 질문 대상 내용으로 구분한다. 공백 차이는 같은 스레드로 본다. 빈 문자열은 세션 전체 대화. */
-export const threadText = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
+/** 같은 프로필의 같은 requestId 는 같은 요청이다. 진행 중 작업과 저장된 요청이 같은 키를 쓴다. */
+export function requestKey(profileId, requestId) {
+	if (typeof requestId !== "string" || !requestId.trim() || requestId.length > 200) throw httpError(400, "requestId 는 비어 있지 않은 200자 이내의 문자열이어야 해요.");
+	return `${profileId}:${requestId}`;
+}
 
-/** 화면과 서버가 함께 쓰는 스레드 식별자. 브라우저는 계산하지 않고 받아 쓴다. "" 는 세션 전체 대화. */
-export const threadKey = (text) => {
-	const normalized = threadText(text);
-	return normalized ? createHash("sha256").update(normalized).digest("hex").slice(0, 16) : "";
-};
+export const requestSignature = (payload) => fingerprint(JSON.stringify(payload));
 
+/** 저장된 요청 결과. 완료는 {answer}, 실패·중단·이전 실행의 미완료는 {error}. */
+function settled(state, profileId, stored, signature) {
+	if (stored.signature !== signature) throw httpError(409, "같은 requestId 를 다른 질문에 사용할 수 없어요.");
+	if (stored.state === "complete") {
+		const record = state.records.find((entry) => entry.profileId === profileId && (entry.recordId ?? entry.id) === stored.recordId);
+		const answer = stored.answer ?? record?.answer;
+		if (!answer) throw httpError(500, "완료된 요청의 원본 답변을 찾을 수 없어요. 중복 실행을 막기 위해 다시 생성하지 않아요.");
+		return { answer };
+	}
+	if (stored.state === "failed") return { error: httpError(stored.status, stored.error) };
+	if (stored.state === "cancelled") return { error: Object.assign(httpError(409, "이 요청은 중단됐어요. 다시 물으려면 새로 질문해 주세요."), { cancelled: true }) };
+	return { error: httpError(409, "이 요청은 이전 실행에서 중단되었거나 아직 처리 중이에요. 같은 요청을 자동 재실행하지 않아요. 다시 묻으려면 새 requestId 를 사용하세요.") };
+}
+
+/** 읽기 전용 확인. 저장된 결과가 없으면 null. */
+export async function storedRequest(profileId, requestId, signature) {
+	const state = await readState();
+	profileFrom(state, profileId);
+	const stored = state.requests[requestKey(profileId, requestId)];
+	return stored ? settled(state, profileId, stored, signature) : null;
+}
+
+/**
+ * 모델을 부르기 직전에 시작 상태를 저장한다. 프로세스가 중단돼도 같은 ID로 모델을 다시 부르지 않는다.
+ * 그사이 결과가 생겼으면 그것을 돌려준다. 새로 시작했으면 {request}.
+ */
+export function beginRequest(profileId, requestId, signature) {
+	const key = requestKey(profileId, requestId);
+	return updateState((state) => {
+		profileFrom(state, profileId);
+		const stored = state.requests[key];
+		if (stored) return settled(state, profileId, stored, signature);
+		state.requests[key] = { signature, profileId, state: "pending", runId: RUN_ID, startedAt: new Date().toISOString() };
+		return { request: { key, signature, profileId } };
+	});
+}
+
+/** 시작한 요청의 실패·중단을 기록한다. */
+export function settleRequest(request, error) {
+	return updateState((state) => {
+		if (state.requests[request.key]?.state !== "pending") return;
+		state.requests[request.key] = error.cancelled
+			? { ...state.requests[request.key], state: "cancelled", cancelledAt: new Date().toISOString() }
+			: { ...state.requests[request.key], state: "failed", error: String(error.message ?? error), status: error.status ?? 500 };
+	});
+}
+
+/** 답을 문답으로 저장하고 요청을 완료한다. 학습 분류는 뒤에서 채운다(`learning.applyClassification`). */
+export function completeAnswer(request, context, answer, entry) {
+	return updateState((state) => {
+		profileFrom(state, request.profileId);
+		const stored = state.requests[request.key];
+		if (!stored || stored.signature !== request.signature || stored.state !== "pending") throw httpError(409, "요청 저장 상태가 바뀌었어요.");
+		const ts = new Date().toISOString();
+		const recordId = randomUUID();
+		const response = { ...answer, recordId, learning: { concepts: [], domains: [], keywords: [], repeated: false, classification: "pending" } };
+		state.records.push({ ...entry, id: recordId, recordId, ts, profileId: request.profileId, sessionId: context.source.sessionId, question: context.question, ...(context.focus ? { focus: context.focus } : {}), auto: context.auto, sourceFingerprint: context.source.fingerprint, answer: response });
+		state.requests[request.key] = { ...stored, state: "complete", completedAt: ts, recordId };
+		return { response, startedAt: stored.startedAt };
+	});
+}
+
+/** 프로필의 즐겨찾기 스레드. `sessionId` 가 없으면 모든 세션. */
 export async function favorites(profileId, sessionId) {
 	const state = await readState();
+	profileFrom(state, profileId);
 	return (state.favorites ?? []).filter((entry) => entry.profileId === profileId && (!sessionId || entry.sessionId === sessionId)).map(({ sessionId: id, label, text, ts }) => ({ sessionId: id, label, text, ts, thread: threadKey(text) }));
 }
 
 /** 즐겨찾기 켜기/끄기. 같은 스레드는 한 번만 저장한다. */
 export function setFavorite(profileId, sessionId, focus, on) {
 	return updateState((state) => {
+		profileFrom(state, profileId);
 		const list = (state.favorites ??= []);
 		const text = threadText(focus?.text);
 		const index = list.findIndex((entry) => entry.profileId === profileId && entry.sessionId === sessionId && threadText(entry.text) === text);

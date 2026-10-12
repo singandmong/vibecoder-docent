@@ -5,16 +5,17 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { conversationPool } from "./conversation.mjs";
 import { checkOverride, depthDecider } from "./depth.mjs";
-import { displayOf, parseCards, parseFocus, questionContext, recentDialogue, steerMessage, threadKey, threadRecords } from "./dialogue.mjs";
+import { displayOf, parseCards, parseFocus, questionContext, recentDialogue, steerMessage, threadRecords } from "./dialogue.mjs";
 import { extractCitations, prepareEvidence } from "./evidence.mjs";
 import { jobRegistry } from "./jobs.mjs";
 import { httpError } from "./errors.mjs";
-import { applyClassification, beginRequest, completeAnswer, explanationHints, parsePlan, planningContext, planningInput, profile, requestKey, requestSignature, settleRequest, sourceScope, storedRequest } from "./learning.mjs";
+import { applyClassification, explanationHints, parsePlan, planningContext, planningInput, profile, sourceScope } from "./learning.mjs";
 import { selectedModel } from "./models.mjs";
 import { extractTerms, filterTerms } from "./review.mjs";
 import { CancelledError } from "./runner.mjs";
 import { parseAnswer } from "./slots.mjs";
-import { history } from "./store.mjs";
+import { beginRequest, completeAnswer, history, requestKey, requestSignature, settleRequest, storedRequest } from "./store.mjs";
+import { threadKey } from "./thread.mjs";
 
 const MANUAL_GRACE_MS = 1500;
 const SOURCE_CACHE = 8;
@@ -160,7 +161,7 @@ export function createAsk({ runner, providerOf, prompts, notify }) {
 
 	/** 설명 → 근거 검증 → 저장 → (뒤에서) 학습 분류. 설명은 스레드 대화에서 스트림으로 나온다. */
 	async function explain(job, { profileId, current, id, q, focus, difficulty, cards, thread, requestId }) {
-		const begun = await beginRequest(profileId, job.key, job.signature);
+		const begun = await beginRequest(profileId, requestId, job.signature);
 		if (begun.answer) return begun.answer;
 		if (begun.error) throw begun.error;
 		const t0 = Date.now();
@@ -199,7 +200,7 @@ export function createAsk({ runner, providerOf, prompts, notify }) {
 			classifyLater({ context, response, startedAt, model, sessionId: id, thread, cards });
 			return response;
 		} catch (error) {
-			await settleRequest(job.key, job.signal.aborted ? { cancelled: true } : error);
+			await settleRequest(begun.request, job.signal.aborted ? { cancelled: true } : error);
 			throw error;
 		}
 	}
@@ -249,7 +250,7 @@ export function createAsk({ runner, providerOf, prompts, notify }) {
 			const running = join();
 			if (running) return running;
 			// 완료된 요청은 이후 모델 설정·카탈로그와 무관하게 저장된 답을 돌려준다.
-			const stored = await storedRequest(profileId, key, signature);
+			const stored = await storedRequest(profileId, requestId, signature);
 			if (stored) return stored;
 			const again = join();
 			if (again) return again;

@@ -1,5 +1,6 @@
 // 배운 내용 다시보기의 용어 사전. 문답마다 뽑은 핵심 단어(keywords)를 모아 단어 중심으로 보여 준다.
 // 새 문답은 학습 분류 단계에서, 옛 문답은 사용자가 요청할 때 한 번에 뽑는다(extract*).
+import { rowKey } from "./store.mjs";
 
 const MAX_KEYWORDS = 5;
 const MAX_CONTEXTS = 6;
@@ -30,9 +31,6 @@ export function parseKeywords(value) {
 	}
 	return out;
 }
-
-/** 저장 위치와 무관한 문답 식별자. 옛 questions.jsonl 줄은 시각과 세션으로 식별한다. */
-export const rowKey = (row) => row.recordId ?? row.id ?? `legacy:${row.ts}\n${row.sessionId}`;
 
 function plainLine(text) {
 	const line = String(text ?? "").split("\n").map((value) => value.replace(/^\s*(?:[#>*+-]+\s*|\d+[.)]\s+)*/, "").replace(/\*\*|__|`/g, "").replace(/^\s*[✅⏳⛔]\s*/u, "").trim()).find(Boolean) ?? "";

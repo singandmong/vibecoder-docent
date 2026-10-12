@@ -398,7 +398,6 @@ async function respondAsk(req, res, input) {
 }
 
 async function evidenceFor(sessionId, ref, profileId) {
-	await profile(profileId);
 	if (!sessionId || typeof ref !== "string" || !/^s_[a-f0-9]{40}$/.test(ref)) throw httpError(400, "유효한 세션과 근거 ID가 필요해요.");
 	const rows = await history(sessionId, profileId);
 	const saved = rows.flatMap((row) => row.answer?.citations ?? []).find((citation) => citation.id === ref && citation.sessionId === sessionId);
@@ -474,33 +473,17 @@ const handler = async (req, res) => {
 		}
 		if (req.method === "GET" && url.pathname === "/api/history") {
 			const id = url.searchParams.get("id") || undefined;
-			const profileId = url.searchParams.get("profileId") ?? "default";
-			await profile(profileId);
 			// 원격의 같은 이름/ID는 같은 사람이라는 증거가 아니다. 여기서 선택한 프로필의 기록만 읽는다.
-			return json(res, 200, (await history(id, profileId)).map((row) => (displayOf(row.question) ? { ...row, display: displayOf(row.question) } : row)));
+			return json(res, 200, (await history(id, url.searchParams.get("profileId") ?? "default")).map((row) => (displayOf(row.question) ? { ...row, display: displayOf(row.question) } : row)));
 		}
-		if (req.method === "GET" && url.pathname === "/api/glossary") {
-			const profileId = url.searchParams.get("profileId") ?? "default";
-			await profile(profileId);
-			return json(res, 200, glossary(await history(undefined, profileId)));
-		}
-		if (req.method === "GET" && url.pathname === "/api/favorites") {
-			const profileId = url.searchParams.get("profileId") ?? "default";
-			await profile(profileId);
-			return json(res, 200, await favorites(profileId, url.searchParams.get("id") || undefined));
-		}
+		if (req.method === "GET" && url.pathname === "/api/glossary") return json(res, 200, glossary(await history(undefined, url.searchParams.get("profileId") ?? "default")));
+		if (req.method === "GET" && url.pathname === "/api/favorites") return json(res, 200, await favorites(url.searchParams.get("profileId") ?? "default", url.searchParams.get("id") || undefined));
 		if (req.method === "POST" && url.pathname === "/api/favorites") {
 			const input = await body(req);
-			const profileId = input.profileId ?? "default";
-			await profile(profileId);
 			if (typeof input.id !== "string" || !input.id || input.id.length > 2048 || typeof input.favorite !== "boolean") throw httpError(400, "세션 id와 즐겨찾기 여부가 필요해요.");
-			return json(res, 200, await setFavorite(profileId, input.id, parseFocus(input.focus), input.favorite));
+			return json(res, 200, await setFavorite(input.profileId ?? "default", input.id, parseFocus(input.focus), input.favorite));
 		}
-		if (req.method === "GET" && url.pathname === "/api/wiki") {
-			const profileId = url.searchParams.get("profileId") ?? "default";
-			await profile(profileId);
-			return json(res, 200, wiki(await history(undefined, profileId)));
-		}
+		if (req.method === "GET" && url.pathname === "/api/wiki") return json(res, 200, wiki(await history(undefined, url.searchParams.get("profileId") ?? "default")));
 		if (req.method === "POST" && url.pathname === "/api/wiki/extract") {
 			const profileId = (await body(req)).profileId ?? "default";
 			return json(res, 200, await extractKeywords(profileId));

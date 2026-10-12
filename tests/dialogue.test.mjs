@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { focusOfEvent, parseCards, parseFocus, recentDialogue, threadKey, threadRecords } from "../app/dialogue.mjs";
+import { focusOfEvent, parseCards, parseFocus, recentDialogue, threadRecords } from "../app/dialogue.mjs";
+import { threadKey } from "../app/thread.mjs";
 
 const record = (n, extra = {}) => ({ question: `질문 ${n}`, answer: { headline: `결론 ${n}`, explain: `설명 ${n}` }, ...extra });
 

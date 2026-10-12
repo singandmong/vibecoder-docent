@@ -7,7 +7,8 @@ import { join } from "node:path";
 const home = await mkdtemp(join(tmpdir(), "docent-learning-test-"));
 process.env.DOCENT_HOME = home;
 const learning = await import("../app/learning.mjs");
-const { history } = await import("../app/store.mjs");
+const records = await import("../app/store.mjs");
+const { history } = records;
 const source = { sessionId: "claude:project/test.jsonl", project: "project:local:/project", fingerprint: "source-version", cwd: "/project" };
 const answer = { raw: "답변", headline: "답변", difficulty: "HARD", citations: [] };
 
@@ -17,8 +18,7 @@ const classify = (context, priorId = null, relation = "same-incident") => learni
 
 /** 서버의 요청 흐름과 같다: 시작 기록 → 생성 → 완료. 저장된 결과가 있으면 재생한다. */
 async function ask(profileId, requestId, payload, generate) {
-	const key = learning.requestKey(profileId, requestId);
-	const begun = await learning.beginRequest(profileId, key, learning.requestSignature(payload));
+	const begun = await records.beginRequest(profileId, requestId, records.requestSignature(payload));
 	if (begun.answer) return begun.answer;
 	if (begun.error) throw begun.error;
 	return generate(begun.request);
@@ -26,7 +26,7 @@ async function ask(profileId, requestId, payload, generate) {
 
 /** 답을 먼저 저장하고, 뒤에서 학습 분류를 붙인다 (ADR 0032). */
 async function finish(request, context, plan) {
-	const { response, startedAt } = await learning.completeAnswer(request, context, answer, {});
+	const { response, startedAt } = await records.completeAnswer(request, context, answer, {});
 	return learning.applyClassification(context, response.recordId, plan, startedAt);
 }
 
@@ -91,7 +91,7 @@ test("learning preserves profile isolation, explicit feedback, repeat and retry 
 		assert.equal(invocations, 1);
 		// 중단한 요청은 같은 ID로 다시 보내도 모델을 부르지 않고 중단으로 남는다.
 		await assert.rejects(ask(alice.id, "stopped", {}, async (request) => {
-			await learning.settleRequest(request.key, { cancelled: true });
+			await records.settleRequest(request, { cancelled: true });
 			throw Object.assign(new Error("stopped"), { cancelled: true });
 		}), { cancelled: true });
 		await assert.rejects(ask(alice.id, "stopped", {}, generate), { status: 409, cancelled: true });
