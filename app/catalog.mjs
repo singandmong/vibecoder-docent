@@ -14,6 +14,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { httpError } from "./errors.mjs";
 import { watchSession } from "./live.mjs";
+import { compareSessions } from "./herdr-workspaces.mjs";
 import { gitLocationOf, headOf } from "./repo.mjs";
 import { recentLine } from "./session-recent.mjs";
 import { pickFromTail, readHead } from "./session-file.mjs";
@@ -29,8 +30,9 @@ const RECENT_TAIL_BYTES = [256 * 1024, 2 * 1024 * 1024];
  * 파일을 읽는 일은 session-file.mjs, 읽은 글의 해석(목록 메타·숨김, 전사, 사건 카드)은 adapter 가 한다 (ADR 0054).
  * `adapter.stamp(path)` 는 본 파일 밖에서 전사에 들어가는 것(예: 서브에이전트 파일)의 변경 표시다.
  * 제공자들은 전사 캐시(최근 8개)와 작업 폴더별 git 위치 기억을 함께 쓴다.
+ * `herdr`(herdr-workspaces.mjs 의 `herdrWorkspaces()`)를 주면 Herdr 창에 열린 세션 항목에 `herdr: {workspace, label, number, pane}` 을 붙인다 (ADR 0060). 없으면 붙이지 않는다.
  */
-export function localProviders(adapters, { home }) {
+export function localProviders(adapters, { home, herdr = null }) {
 	const transcripts = new Map();
 	const places = new Map();
 	/** 작업 폴더의 git 위치(저장소, 워크트리, gitdir). 폴더 구조는 잘 바뀌지 않아 폴더별로 기억한다. */
@@ -39,10 +41,10 @@ export function localProviders(adapters, { home }) {
 		if (!places.has(cwd)) places.set(cwd, await gitLocationOf(cwd));
 		return places.get(cwd);
 	};
-	return adapters.map((adapter) => localProvider(adapter, { home, transcripts, placeOf }));
+	return adapters.map((adapter) => localProvider(adapter, { home, transcripts, placeOf, herdr }));
 }
 
-function localProvider(adapter, { home, transcripts, placeOf }) {
+function localProvider(adapter, { home, transcripts, placeOf, herdr }) {
 	const { id, depth = 1, match = /\.jsonl$/, headBytes } = adapter;
 	const root = join(home, adapter.dir);
 	const metas = new Map();
@@ -90,6 +92,7 @@ function localProvider(adapter, { home, transcripts, placeOf }) {
 		/** 머리 읽기는 파일이 바뀐 것만. 이어 쓰는 세션은 머리가 한 번 다 찼으면 다시 읽지 않는다. */
 		async list() {
 			const out = [];
+			const open = (await herdr?.sessions()) ?? new Map();
 			for (const path of await walk(root, 0)) {
 				const st = await stat(path).catch(() => null);
 				if (!st?.size) continue;
@@ -114,6 +117,7 @@ function localProvider(adapter, { home, transcripts, placeOf }) {
 					bytes: st.size,
 					first: m.first ?? null,
 					host: null,
+					...(open.has(resolve(path)) ? { herdr: open.get(resolve(path)) } : {}),
 				});
 			}
 			return out;
@@ -156,7 +160,7 @@ function localProvider(adapter, { home, transcripts, placeOf }) {
 }
 
 /**
- * 제공자들 위의 세션 목록. 세션 id 로 제공자 찾기, 합친 목록(최근 활동 순 200개, 꾸미기는 그 세션을 가진 제공자가),
+ * 제공자들 위의 세션 목록. 세션 id 로 제공자 찾기, 합친 목록(Herdr 에 열린 세션 먼저, 그다음 최근 활동 순 200개, 꾸미기는 그 세션을 가진 제공자가),
  * 이 컴퓨터의 파일 경로 → 세션 id 를 맡는다.
  */
 export function sessionCatalog(providers) {
@@ -172,7 +176,9 @@ export function sessionCatalog(providers) {
 		async list() {
 			const listed = await Promise.all(providers.map(async (provider) => (await provider.list()).map((session) => ({ provider, session }))));
 			const all = listed.flat();
-			all.sort((a, b) => (a.session.updated < b.session.updated ? 1 : -1));
+			// Herdr 에 열린 세션이 먼저(ADR 0060), 나머지는 최근 활동 순. 자르기 전에 정렬해 Herdr 세션이 200개 밖으로 밀리지 않는다.
+			const hostOrder = (host) => providers.findIndex((p) => p.host === host);
+			all.sort((a, b) => compareSessions(a.session, b.session, hostOrder));
 			const top = all.slice(0, LIST_MAX);
 			const described = new Map();
 			await Promise.all(providers.map(async (provider) => {

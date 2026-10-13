@@ -46,8 +46,8 @@ export async function fixture(t) {
 	await writeFile(controlFile, "{}");
 	await writeFile(logFile, "");
 	// control: holdPlanning, failPlanning, failExplanation, slowExplanation(ms per chunk)
-	await writeFile(executable, `#!${process.execPath}
-import { appendFile, readFile, stat } from 'node:fs/promises';
+	// 가짜 omp 는 `.mjs` 라 서버가 OMP_BIN 을 Node 로 실행한다(shebang 에 기대지 않아 Windows 에서도 된다).
+	await writeFile(executable, `import { appendFile, readFile, stat } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createInterface } from 'node:readline';
 const args = process.argv.slice(2);
@@ -113,7 +113,7 @@ if (args[0] === '--version') {
 	}
 	console.log(planning ? JSON.stringify({ kind: 'why', domains: [], concepts: [] }) : '[]');
 }
-`, { mode: 0o700 });
+`);
 	let server;
 	let address;
 	async function stop() {

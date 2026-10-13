@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { ompCommand } from "./omp-bin.mjs";
 
 const OMP_BIN = process.env.OMP_BIN ?? "omp";
 const BILLING_NOTICE = "OMP 모델 카탈로그의 입력, 출력 단가는 USD / 100만 토큰 기준 참고값이에요. 연결, 인증 또는 실제 청구액을 보장하지 않으며, 0도 무료를 뜻하지 않아요. 구독 포함량, 캐시, 가격 구간에 따라 실제 비용이 달라질 수 있어요.";
@@ -15,7 +16,8 @@ function catalogCost(cost) {
 /** The catalog is not proof of provider authentication or actual billing. */
 export function modelCatalog() {
 	return new Promise((resolve, reject) => {
-		const child = execFile(OMP_BIN, ["models", "--json"], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, TERM: "dumb" } }, (error, stdout) => {
+		const target = ompCommand(OMP_BIN, ["models", "--json"]);
+		const child = execFile(target.command, target.args, { timeout: 30_000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, TERM: "dumb" } }, (error, stdout) => {
 			if (error) return reject(catalogError());
 			try {
 				const catalog = JSON.parse(stdout);

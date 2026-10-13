@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { Streamdown, defaultRemarkPlugins } from "streamdown";
+import { Streamdown } from "streamdown";
+import { docentRemarkPlugins } from "./markdown-remark.mjs";
 import "./markdown.css";
 
 const mounts = new Map();
@@ -78,7 +79,7 @@ function render(entry) {
     },
   };
   const names = [...terms.keys()].sort((a, b) => b.length - a.length);
-  entry.root.render(<Streamdown mode="static" parseIncompleteMarkdown={false} skipHtml rehypePlugins={[]} remarkPlugins={[...Object.values(defaultRemarkPlugins), [docentProse, { names }]]} components={components} controls={false} linkSafety={{ enabled: false }} urlTransform={(url, key) => key === "src" ? undefined : safeHref(url)}>{entry.text}</Streamdown>);
+  entry.root.render(<Streamdown mode="static" parseIncompleteMarkdown={false} skipHtml rehypePlugins={[]} remarkPlugins={docentRemarkPlugins([[docentProse, { names }]])} components={components} controls={false} linkSafety={{ enabled: false }} urlTransform={(url, key) => key === "src" ? undefined : safeHref(url)}>{entry.text}</Streamdown>);
 }
 
 export function mountMarkdown(element, text, options = {}) {

@@ -3,9 +3,11 @@
 ```
 prompt/docent.md          코어. 호스트 중립 프롬프트. 유일한 진실.
 app/server.mjs            로컬 웹앱 서버. 조립과 HTTP 경로. 세션은 catalog.mjs, 설명 요청은 ask.mjs 에 맡기고 NDJSON 스트림/JSON으로 응답
-app/catalog.mjs           세션 목록 module: 이 컴퓨터의 제공자(호스트 adapter + 정규화 전사 캐시)와 다른 컴퓨터의 제공자를 같은 interface 로, 세션 id → 제공자(모르면 400), 합친 목록(최근 활동 순 200개, 꾸미기는 세션의 제공자가), 파일 경로 → 세션 id(목록과 같은 depth·match 규칙). 세션 id 의 경로 부분은 운영체제와 관계없이 `/` (ADR 0056·0057)
+app/catalog.mjs           세션 목록 module: 이 컴퓨터의 제공자(호스트 adapter + 정규화 전사 캐시)와 다른 컴퓨터의 제공자를 같은 interface 로, 세션 id → 제공자(모르면 400), 합친 목록(Herdr 에 열린 세션 먼저, 그다음 최근 활동 순 200개, 꾸미기는 세션의 제공자가), 파일 경로 → 세션 id(목록과 같은 depth·match 규칙). 세션 id 의 경로 부분은 운영체제와 관계없이 `/` (ADR 0056·0057·0060)
+app/herdr-workspaces.mjs  Herdr 작업 공간: `herdr agent list`, `herdr workspace list` 를 3초 캐시로 읽어 세션 파일 경로 → {workspace, label, number, pane}. PATH 의 herdr, 없으면 ~/.local/bin/herdr, 1.5초 제한, 실패하면 정보 없음. 목록 정렬 비교(compareSessions) 포함 (ADR 0060)
 app/ask.mjs               설명 요청 module: 작업 열기·합류·재생, 사용자 질문 우선 게이트, 같은 스레드 순서 실행, 설명 → 근거 → 저장 → 뒤에서 학습 분류. runner 를 받아 쓴다 (ADR 0050)
 app/runner.mjs            omp 실행 정책 한곳: 사용자 전역 설정 격리, 한 번 호출(-p)과 RPC 대화, 중단·바로잡기 (ADR 0028)
+app/omp-bin.mjs           OMP_BIN → 실행할 명령. `.js`·`.mjs`·`.cjs` 진입점은 지금 Node 로 실행(Windows 는 shebang 을 못 읽음). runner·models·doctor·시작 확인이 모두 거침 (ADR 0062)
 app/depth.mjs             설명 깊이 module: 고른 깊이 > 분야 판정(분야별 설정이 있을 때만) > 기본값, 판정 실패 규칙, thinking 표. 터미널 상태줄도 같은 표를 씀 (ADR 0028·0040·0051)
 app/errors.mjs            화면에 보여 줄 오류(httpError)
 app/conversation.mjs      스레드 = 살아 있는 RPC 대화. 전사는 처음 한 번 + 이후 새 기록만, 닫힌 스레드는 저장된 문답으로 복원 (ADR 0028)
@@ -34,11 +36,12 @@ app/mobile.mjs           PWA 설치, 연결 안내, 모바일 표시 상태
 app/sw.js                개인 기록 없는 오프라인 안내만 캐시
 app/terminal-ui.mjs       터미널 클라이언트 화면: 대화, 입력창(자리별 초안), 대기 질문, 기호 메뉴, 선택 목록. 대화 목록과 스레드 소속은 conversations.mjs, 설명 요청 상태는 session-client.mjs (ADR 0038·0039·0053·0055)
 app/terminal-status.mjs   터미널 상태줄 규칙 표와 그리기, 좁은 화면 항목 빼기 (ADR 0040)
-app/terminal-markdown.mjs Pi Markdown 렌더러 연결과 제어 문자 차단 (ADR 0038)
+app/terminal-markdown.mjs Pi Markdown 렌더러 연결과 제어 문자 차단. 한글 옆 `**` 강조는 `cjkFriendlyEmphasis` 전처리로 굵게 (ADR 0038·0061)
+app/markdown-remark.mjs   웹 Markdown 의 remark 플러그인 순서. `@streamdown/cjk` 로 한글 옆 강조와 취소선을 풂. 빌드 입력이라 배포 패키지에서 빠짐 (ADR 0061)
 app/terminal-theme.mjs    OMP titanium 역할별 색 (ADR 0038)
 app/terminal-herdr.mjs    Herdr 안에서 agents 창에 도슨트 상태(대기, 작업 중, 막힘)와 재시작 명령을 알림 (ADR 0043)
-app/herdr-launch.mjs      `docent herdr`: Herdr 창을 나눠 도슨트 터미널을 띄우고 세션을 고름, 이미 있으면 이동. 꺼진 서버는 server-process.mjs 로 켬 (ADR 0044)
-app/server-process.mjs    `docent start`, `docent stop`: 명령과 떨어진 프로세스로 서버를 켜고(출력은 DOCENT_HOME/server.log) /api/health 의 pid 로 끔 (ADR 0057)
+app/herdr-launch.mjs      `docent herdr`: 터미널(TTY)이면 그 창에서 도슨트 터미널을 바로 실행, `--split` 이거나 TTY 가 아니면 Herdr 창을 나눠 띄우고 이미 있으면 이동. 세션을 고르고 꺼진 서버는 server-process.mjs 로 켬 (ADR 0044·0059)
+app/server-process.mjs    `docent start`, `docent stop`: 명령과 떨어진 프로세스로 서버를 켜고(출력은 DOCENT_HOME/server.log) /api/health 의 pid 로 끔. Windows 는 WMI `Win32_Process.Create` 로 만들어 SSH 세션이 끝나도 남음 (ADR 0057·0058)
 app/install-omp.mjs       `docent install-omp`: 프론트매터 + 코어를 결합해 omp 서브에이전트 정의로, `/docent` 확장 복사. 셸 없이 모든 OS 에서 같은 명령 (ADR 0057)
 adapters/omp/docent-command.ts  OMP `/docent` 슬래시 명령. `docent herdr`를 부르는 얇은 확장 (ADR 0044)
 app/doctor.mjs            `docent doctor`: Node, omp와 모델, 서버와 세션 수, 선택적 모델 호출 점검 (ADR 0041)
@@ -84,7 +87,7 @@ docs/                     개념·범위·결정
 
 ## 세션 제공자
 
-`app/catalog.mjs` 의 `sessionCatalog(providers)` 가 세션 목록 module 이다 (ADR 0056). 제공자는 이 컴퓨터의 것(`localProviders`)과 다른 컴퓨터의 것(`peerProvider`) 모두 `{id, host, owns, check, list, describe, transcript, watch, idOf}` 를 낸다. 서버의 `/api/sessions`, `/api/sessions/resolve`, `/api/transcript`, `/api/live`, 미리 설명 감시, 설명 요청의 전사는 모두 이 module 에 위임한다. 세션 자리는 제공자 폴더 아래 `depth` 단계 폴더 안, 이름이 `match` 와 맞는 파일이고, 목록 걷기·id → 경로·경로 → id 가 같은 규칙을 쓴다. 목록에 없는 자리의 id 는 400, 경로는 404.
+`app/catalog.mjs` 의 `sessionCatalog(providers)` 가 세션 목록 module 이다 (ADR 0056). 제공자는 이 컴퓨터의 것(`localProviders`)과 다른 컴퓨터의 것(`peerProvider`) 모두 `{id, host, owns, check, list, describe, transcript, watch, idOf}` 를 낸다. 서버의 `/api/sessions`, `/api/sessions/resolve`, `/api/transcript`, `/api/live`, 미리 설명 감시, 설명 요청의 전사는 모두 이 module 에 위임한다. 세션 자리는 제공자 폴더 아래 `depth` 단계 폴더 안, 이름이 `match` 와 맞는 파일이고, 목록 걷기·id → 경로·경로 → id 가 같은 규칙을 쓴다. 목록에 없는 자리의 id 는 400, 경로는 404. 이 컴퓨터의 제공자는 Herdr 에 열린 세션 항목에 `herdr: {workspace, label, number, pane}` 을 붙이고(`localProviders` 의 `herdr` 옵션), 목록은 200개로 자르기 전에 이 컴퓨터 Herdr 세션(작업 공간 번호, 창 번호), 다른 컴퓨터의 Herdr 세션(컴퓨터별), 나머지(최근 활동) 순으로 정렬한다. 다른 컴퓨터의 `herdr` 는 그쪽 서버가 보낸 그대로 쓴다 (ADR 0060).
 
 이 컴퓨터의 제공자는 호스트 adapter 하나를 감싼다. adapter 는 `{id, dir, depth, match, headBytes, meta(head, path), transcript(text, path), events(chunk), stamp?(path)}` 이고 줄 해석, 숨김·제목 규칙, 작업 폴더 찾기를 안에 가진다 (ADR 0054). 지금은 `omp`(`~/.omp/agent/sessions/*/*.jsonl`), `claude`(`~/.claude/projects/*/*.jsonl`, 서브에이전트 파일을 `stamp`로 캐시 기준에 포함), `codex`(`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`), `gemini`(`~/.gemini/tmp/*/chats/session-*.jsonl`, 작업 폴더는 `.project_root`), `pi`(`~/.pi/agent/sessions/*/*.jsonl`). 목록은 바뀐 파일의 머리만 다시 읽는다. 새 호스트는 adapter 모듈 하나 + 서버의 `localProviders` 배열 한 줄. 전사 출력 모양(`## user` / `## assistant` / `→ 도구(…) ⇒ ok·에러·사용자 답`, AI의 질문은 질문 문장·선택지 포함)은 호스트가 달라도 같아야 한다. 도슨트는 구분하지 않는다. 머리말의 작업 폴더를 모르면 `?` 로 적고, 학습 범위는 이를 작업 폴더 없음으로 읽는다.
 
@@ -113,7 +116,7 @@ docs/                     개념·범위·결정
 
 ## 미리 설명 (ADR 0031)
 
-프로필이 세션을 열면 서버가 12시간 동안 그 세션을 지켜보고, 탭을 닫아도 선별된 새 질문·결과·계획을 EASY로 미리 설명한다. requestId는 프로필·세션·스레드로 정해져 브라우저가 같은 요청으로 붙거나 저장된 답을 받는다. 켜기/끄기는 프로필 `autoExplain`(기본 켬), 상태는 `GET /api/prefetch`. 프로필마다 한 번에 하나, 10분에 5개까지이며, 사용자 질문이 진행 중이거나 막 끝났으면 기다린다. 미리 설명이 도는 스레드에 사용자가 물으면 그 질문은 미리 설명이 끝난 뒤 같은 대화에서 이어진다(ADR 0050). 과거 재생은 미리 설명하지 않는다. 미리 설명도 스레드 대화에 보이므로 이어 묻기 맥락에 들어간다.
+프로필이 세션을 열면 서버가 12시간 동안 그 세션을 지켜보고, 탭을 닫아도 선별된 새 질문·결과·계획을 EASY로 미리 설명한다. requestId는 프로필·세션·스레드로 정해져 브라우저가 같은 요청으로 붙거나 저장된 답을 받는다. 켜기/끄기는 프로필 `autoExplain`(새 설치와 새 프로필은 끔, 필드 없는 옛 프로필은 켬, ADR 0063), 상태는 `GET /api/prefetch`. 프로필마다 한 번에 하나, 10분에 5개까지이며, 사용자 질문이 진행 중이거나 막 끝났으면 기다린다. 미리 설명이 도는 스레드에 사용자가 물으면 그 질문은 미리 설명이 끝난 뒤 같은 대화에서 이어진다(ADR 0050). 과거 재생은 미리 설명하지 않는다. 미리 설명도 스레드 대화에 보이므로 이어 묻기 맥락에 들어간다.
 
 ## 속도 (ADR 0028·0030)
 

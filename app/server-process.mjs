@@ -44,19 +44,69 @@ export async function startServer({ port, args = [], env = process.env }) {
 	const log = serverLog(env);
 	if (await serverAt(port)) return { started: false, url, log };
 	mkdirSync(dirname(log), { recursive: true });
-	const fd = openSync(log, "a");
-	const child = spawn(process.execPath, [DOCENT_BIN, "--no-open", "--port", String(port), ...args], { detached: true, windowsHide: true, stdio: ["ignore", fd, fd], env });
-	closeSync(fd);
+	const serverArgs = [DOCENT_BIN, "--no-open", "--port", String(port), ...args];
+	let alive = () => !exited;
 	let exited = false;
-	child.once("exit", () => { exited = true; });
-	child.unref();
+	if (process.platform === "win32") {
+		const pid = await createViaWmi(serverArgs, log, env);
+		alive = () => {
+			try {
+				process.kill(pid, 0);
+				return true;
+			} catch (error) {
+				return error.code === "EPERM";
+			}
+		};
+	} else {
+		const fd = openSync(log, "a");
+		const child = spawn(process.execPath, serverArgs, { detached: true, windowsHide: true, stdio: ["ignore", fd, fd], env });
+		closeSync(fd);
+		child.once("exit", () => { exited = true; });
+		child.unref();
+	}
 	const deadline = Date.now() + START_WAIT_MS;
-	while (!exited && Date.now() < deadline) {
+	while (alive() && Date.now() < deadline) {
 		await sleep(300);
 		if (await healthOf(url)) return { started: true, url, log };
 	}
 	const last = tail(log);
 	throw new Error(`도슨트 서버를 켜지 못했어요. 기록: ${log}${last ? `\n${last}` : ""}`);
+}
+
+// Windows OpenSSH 는 세션을 작업 개체(job object)에 넣고 세션이 끝나면 안의 프로세스를 모두 끝낸다. Node 의 분리 프로세스도 못 벗어난다.
+// WMI Win32_Process.Create 로 만든 프로세스는 WmiPrvSE 의 자식이라 그 작업 개체 밖에 있다. 환경 변수는 WMI 가 호출자 것을 물려주지 않으므로
+// PowerShell 이 자기가 물려받은 환경을 읽어 Win32_ProcessStartup.EnvironmentVariables 로 넘긴다. 값(TYPESAFE_API_KEY 등)이 -EncodedCommand 에 들어가지 않는다.
+const WMI_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+$names = @('DOCENT_WMI_CMDLINE', 'DOCENT_WMI_CWD')
+$cmd = $env:DOCENT_WMI_CMDLINE
+$cwd = $env:DOCENT_WMI_CWD
+$vars = @(Get-ChildItem env: | Where-Object { $names -notcontains $_.Name -and -not $_.Name.StartsWith('=') } | ForEach-Object { $_.Name + '=' + $_.Value })
+$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0; EnvironmentVariables = [string[]]$vars }
+$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = $cwd; ProcessStartupInformation = $si }
+if ($r.ReturnValue -ne 0) { [Console]::Error.WriteLine('Win32_Process.Create ReturnValue=' + $r.ReturnValue); exit 1 }
+[Console]::Out.WriteLine('PID=' + $r.ProcessId)
+`;
+
+const quoteCmd = (value) => `"${String(value).replaceAll('"', '""')}"`;
+
+function createViaWmi(serverArgs, log, env) {
+	const inner = `${[process.execPath, ...serverArgs].map(quoteCmd).join(" ")} >> ${quoteCmd(log)} 2>&1`;
+	const wmiEnv = { ...env, DOCENT_WMI_CMDLINE: `cmd /d /c "${inner}"`, DOCENT_WMI_CWD: process.cwd() };
+	const encoded = Buffer.from(WMI_SCRIPT, "utf16le").toString("base64");
+	return new Promise((done, fail) => {
+		const ps = spawn("powershell", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: wmiEnv });
+		let out = "";
+		let err = "";
+		ps.stdout.on("data", (chunk) => { out += chunk; });
+		ps.stderr.on("data", (chunk) => { err += chunk; });
+		ps.once("error", fail);
+		ps.once("close", (code) => {
+			const pid = Number(/PID=(\d+)/.exec(out)?.[1]);
+			if (code === 0 && pid) done(pid);
+			else fail(new Error(`도슨트 서버를 켜지 못했어요(WMI). ${err.trim().split(/\r?\n/).slice(0, 3).join(" ")}`));
+		});
+	});
 }
 
 /**

@@ -16,7 +16,7 @@
   @media (prefers-color-scheme: dark) {
     html:not([data-theme="light"]) { color-scheme:dark; --bg:#141414; --panel:#1e1e1e; --line:#333; --ink:#ececea; --mute:#9a9a94; --accent:#FFD600; --accent-ink:#FFD600; --done:#65bd87; --run:#e4b35d; --blk:#f18080; --hover:#2a2718; --soft:#3a3413; --btn:#252525; --btn-hover:#302b16; --on-accent:#141414; --on-status:#141414; }
   }
-  :root { --platform:light-dark(#2456a6,#93b8f5); --project:light-dark(#725095,#c3a6e2); --host:light-dark(#286a6a,#85c9c6); --activity:light-dark(#876014,#e4be72); --branch:light-dark(#2c7339,#8fd19e); }
+  :root { --platform:light-dark(#2456a6,#93b8f5); --project:light-dark(#725095,#c3a6e2); --host:light-dark(#286a6a,#85c9c6); --activity:light-dark(#876014,#e4be72); --branch:light-dark(#2c7339,#8fd19e); --workspace:light-dark(#a0395a,#f0a3bb); }
   * { box-sizing:border-box }
   [hidden] { display:none !important }
   /* 닫힌 details 의 내용은 레이아웃 상자조차 남기지 않는다. 절대 위치 팝업이 창 밖으로 넘치는 걸 막는다. */
@@ -59,6 +59,7 @@
   .session-meta.platform { color:var(--platform) }
   .session-meta.project { color:var(--project) }
   .session-meta.host { color:var(--host) }
+  .session-meta.workspace { color:var(--workspace) }
   .session-meta.activity { color:var(--activity) }
   .session-meta.time { color:var(--mute); font-variant-numeric:tabular-nums }
   main { display:flex; flex-direction:column; min-width:0; min-height:0 }
@@ -1258,7 +1259,7 @@ function renderSessions() {
   const query = $("#filter").value.trim().toLowerCase();
   const box = $("#sessions"); box.textContent = "";
   const pool = sideTab === "all" ? sessions : sessions.filter((s) => s.host === sideTab);
-  const matches = query ? pool.filter((s) => [s.title, s.repo, s.project, s.worktree, s.branch, s.recent, s.cwd, s.first, s.host].some((value) => value?.toLowerCase().includes(query))) : pool;
+  const matches = query ? pool.filter((s) => [s.title, s.repo, s.project, s.worktree, s.branch, s.recent, s.cwd, s.first, s.host, s.herdr?.label].some((value) => value?.toLowerCase().includes(query))) : pool;
   $("#count").textContent = matches.length;
   const limit = Math.max(sessionLimit, matches.findIndex((s) => s.id === current?.id) + 1);
   for (const s of matches.slice(0, limit)) {
@@ -1269,6 +1270,7 @@ function renderSessions() {
     b.append(el("span", "t", s.title));
     if (s.recent) { const recent = el("span", "r", s.recent); recent.title = `최근 작업: ${s.recent}`; b.append(recent); }
     const meta = el("span", "m");
+    if (s.herdr) { const space = el("span", "session-meta workspace", s.herdr.label || `작업 공간 ${s.herdr.number}`); space.title = `Herdr 작업 공간 ${s.herdr.number}, 창 ${s.herdr.pane}`; meta.append(space); }
     if (s.repo) meta.append(el("span", "session-meta repo", s.repo));
     if (s.worktree) { const tree = el("span", "session-meta worktree", s.worktree); tree.title = "워크트리"; meta.append(tree); }
     if (!s.repo || (s.project !== s.repo && s.project !== s.worktree)) meta.append(el("span", "session-meta project", s.project));
@@ -1299,7 +1301,7 @@ async function select(s) {
   infoSummary.append("세션 정보"); info.append(infoSummary);
   const fields = el("dl");
   const date = (value) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString("ko-KR") : "확인되지 않음";
-  for (const [label, value] of [["작업 폴더", s.cwd], ["레포지토리", s.repo], ["기기", s.host || "로컬"], ["시작", date(s.started)], ["최근 활동", date(s.updated)], ["첫 요청", s.first]]) {
+  for (const [label, value] of [["작업 폴더", s.cwd], ["레포지토리", s.repo], ["기기", s.host || "로컬"], ["Herdr 작업 공간", s.herdr && (s.herdr.label || `작업 공간 ${s.herdr.number}`)], ["시작", date(s.started)], ["최근 활동", date(s.updated)], ["첫 요청", s.first]]) {
     if (value) fields.append(el("dt", null, label), el("dd", null, value));
   }
   const pop = el("div", "session-pop"), link = el("a", null, "기록 원문 열기");

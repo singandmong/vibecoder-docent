@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
-import { launchInHerdr, shellWord } from "../app/herdr-launch.mjs";
+import { EventEmitter } from "node:events";
+import baseTest from "node:test";
+import { launchInHerdr, launchInPlace, shellWord, shouldOpenInPlace } from "../app/herdr-launch.mjs";
 import { fixture } from "./omp-fixture.mjs";
+
+// 가짜 herdr 는 shebang 스크립트라 Windows 에서는 실행되지 않는다.
+const test = (name, fn) => baseTest(name, { skip: process.platform === "win32" && "Herdr is not available on Windows" }, fn);
 
 /** A fake herdr CLI: records each call and answers like Herdr 0.9.3. `agents` is the current agent list. */
 async function fakeHerdr(t, agents = []) {
@@ -66,4 +70,27 @@ test("an existing docent pane in the same workspace is focused instead of splitt
 
 test("shell words survive quotes so session ids reach docent-tui unchanged", () => {
 	assert.equal(shellWord("a'b c"), `'a'\\''b c'`);
+});
+
+test("in a TTY without --split the launcher opens in place; otherwise it splits", () => {
+	assert.equal(shouldOpenInPlace({ isTTY: true }), true);
+	assert.equal(shouldOpenInPlace({ isTTY: true, split: true }), false);
+	assert.equal(shouldOpenInPlace({ isTTY: false }), false);
+});
+
+test("in place spawns docent-tui with inherited stdio and returns its exit code", async (t) => {
+	const f = await fixture(t);
+	const port = Number(new URL(f.address).port);
+	const calls = [];
+	const spawn = (cmd, args, options) => {
+		calls.push({ cmd, args, options });
+		const child = new EventEmitter();
+		setImmediate(() => child.emit("exit", 3, null));
+		return child;
+	};
+	const result = await launchInPlace({ env: {}, port, sessionFile: f.sessionFile, cwd: "/elsewhere", spawn });
+	assert.equal(result.code, 3);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].options.stdio, "inherit");
+	assert.deepEqual(calls[0].args.slice(1), ["--url", `http://127.0.0.1:${port}`, "--session", f.sessionId]);
 });

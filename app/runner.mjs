@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { httpError } from "./errors.mjs";
+import { ompCommand } from "./omp-bin.mjs";
 
 const ISOLATION = "memory:\n  backend: off\nautolearn:\n  enabled: false\n";
 const ISOLATION_FLAGS = ["--no-session", "--no-title", "--no-extensions", "--no-skills", "--no-rules", "--no-lsp"];
@@ -35,7 +36,8 @@ export async function createRunner({ bin, tmpRoot, timeoutMs }) {
 	let closed = false;
 	function launch(args) {
 		if (closed) throw new CancelledError();
-		const child = spawn(bin, args, { env, stdio: ["pipe", "pipe", "ignore"] });
+		const target = ompCommand(bin, args);
+		const child = spawn(target.command, target.args, { env, stdio: ["pipe", "pipe", "ignore"] });
 		children.add(child);
 		child.once("close", () => children.delete(child));
 		return child;

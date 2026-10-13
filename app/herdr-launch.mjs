@@ -1,5 +1,5 @@
-// `docent herdr`: 지금 Herdr 창 오른쪽에 도슨트 터미널을 띄운다 (ADR 0044). OMP `/docent` 도 이 명령을 부른다.
-import { execFile } from "node:child_process";
+// `docent herdr`: 터미널(TTY)에서는 지금 그 창에서 바로 도슨트 TUI 를 연다. `--split` 이거나 TTY 가 아니면 Herdr 창 오른쪽에 띄운다 (ADR 0044, 0059). OMP `/docent` 는 `--split` 으로 부른다.
+import { execFile, spawn as nodeSpawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer } from "./server-process.mjs";
@@ -27,6 +27,25 @@ async function pickSession(base, { session, sessionFile, cwd }) {
 	const dir = resolve(cwd);
 	return (Array.isArray(list) ? list : []).find((entry) => !entry.host && entry.cwd && resolve(entry.cwd) === dir)?.id ?? null;
 }
+
+/**
+ * 이 터미널에서 바로 docent-tui 를 실행한다. Herdr 가 없어도 된다. 서버가 꺼져 있으면 켠다.
+ * @returns {Promise<{ code: number, session: string | null, startedServer: boolean }>}
+ */
+export async function launchInPlace({ env = process.env, cwd = process.cwd(), port = 4747, session = null, sessionFile = null, spawn = nodeSpawn } = {}) {
+	const base = `http://127.0.0.1:${port}`;
+	const { started: startedServer } = await startServer({ port, env });
+	const target = await pickSession(base, { session, sessionFile, cwd });
+	const child = spawn(process.execPath, [TUI_BIN, "--url", base, ...(target ? ["--session", target] : [])], { stdio: "inherit", cwd: resolve(cwd), env });
+	const code = await new Promise((resolveRun, reject) => {
+		child.once("error", reject);
+		child.once("exit", (exitCode, signal) => resolveRun(exitCode ?? (signal ? 1 : 0)));
+	});
+	return { code, session: target, startedServer };
+}
+
+/** 표준 입출력이 모두 TTY 이고 --split 이 아니면 그 자리에서 연다. */
+export const shouldOpenInPlace = ({ split = false, isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY) } = {}) => !split && Boolean(isTTY);
 
 /**
  * @returns {Promise<{ action: "opened" | "focused", pane: string, session: string | null, startedServer: boolean }>}

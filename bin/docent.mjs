@@ -72,20 +72,23 @@ if (args[0] === "herdr") {
 	const rest = args.slice(1);
 	const value = (name) => (rest.includes(name) ? rest[rest.indexOf(name) + 1] : undefined);
 	const known = new Set(["--session", "--session-file", "--cwd", "--port"]);
-	const unknown = rest.find((arg, i) => !known.has(arg) && !known.has(rest[i - 1]));
+	const split = rest.includes("--split");
+	const unknown = rest.find((arg, i) => arg !== "--split" && !known.has(arg) && !known.has(rest[i - 1]));
 	if (unknown || [...known].some((name) => rest.includes(name) && !value(name))) {
-		console.error(`docent herdr: ${unknown ? `알 수 없는 옵션이에요: ${unknown}` : "옵션 뒤에 값이 필요해요."}\nusage: docent herdr [--session <id> | --session-file <경로>] [--cwd <폴더>] [--port N]`);
+		console.error(`docent herdr: ${unknown ? `알 수 없는 옵션이에요: ${unknown}` : "옵션 뒤에 값이 필요해요."}\nusage: docent herdr [--split] [--session <id> | --session-file <경로>] [--cwd <폴더>] [--port N]`);
 		process.exit(2);
 	}
-	const { launchInHerdr } = await import("../app/herdr-launch.mjs");
+	const { launchInHerdr, launchInPlace, shouldOpenInPlace } = await import("../app/herdr-launch.mjs");
 	const { config } = await import("../app/store.mjs");
 	try {
-		const result = await launchInHerdr({
+		const options = {
 			port: Number(value("--port") ?? process.env.DOCENT_PORT ?? (await config()).port ?? 4747),
 			session: value("--session") ?? null,
 			sessionFile: value("--session-file") ?? null,
 			cwd: value("--cwd") ?? process.cwd(),
-		});
+		};
+		if (shouldOpenInPlace({ split })) process.exit((await launchInPlace(options)).code);
+		const result = await launchInHerdr(options);
 		const where = result.session ? `세션 ${result.session}` : "세션 목록";
 		console.log(result.action === "focused"
 			? `이미 열린 도슨트 창(${result.pane})으로 이동했어요.`
@@ -114,7 +117,7 @@ if (args.includes("-h") || args.includes("--help")) {
 			"       docent start [--port N] [--host ...] [--peer ...]   서버를 백그라운드로 켬. 기록은 ~/.docent/server.log",
 			"       docent stop [--port N]   백그라운드로 켠 서버를 끔",
 			"       docent doctor [--json] [--probe] [--port N]   설치 상태 점검. --probe 는 모델을 한 번 불러 로그인까지 확인",
-			"       docent herdr [--session <id> | --session-file <경로>]   Herdr 창 오른쪽에 도슨트 터미널을 띄움",
+			"       docent herdr [--split] [--session <id> | --session-file <경로>]   이 터미널 창에서 바로 도슨트 TUI 를 엶. --split 이면 Herdr 창 오른쪽에 띄움",
 			"       docent install-omp [--project]   omp 서브에이전트 정의와 /docent 명령 설치. 코어나 확장을 고친 뒤에도 다시 실행",
 			"  --host tailscale     이 컴퓨터의 테일스케일 주소에도 열어 다른 컴퓨터의 docent 가 읽어 가게 한다",
 			"  --peer book=http://peer-host.example:4747   그 컴퓨터의 세션을 내 목록에 합친다",
@@ -153,7 +156,9 @@ if (alive) {
 	process.exit(0);
 }
 
-const missing = await new Promise((res) => execFile(process.env.OMP_BIN ?? "omp", ["--version"], (err) => res(Boolean(err))));
+const { ompCommand } = await import("../app/omp-bin.mjs");
+const ompCheck = ompCommand(process.env.OMP_BIN ?? "omp", ["--version"]);
+const missing = await new Promise((res) => execFile(ompCheck.command, ompCheck.args, (err) => res(Boolean(err))));
 if (missing) {
 	console.error("docent: omp 를 찾을 수 없어요. 도슨트는 설치된 omp 로 답을 만들어요. https://omp.sh 에서 설치하고 로그인한 뒤 다시 실행하세요.");
 	process.exit(1);

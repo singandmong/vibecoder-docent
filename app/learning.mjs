@@ -33,7 +33,7 @@ function nameOf(name) {
 export function createProfile(name) {
 	const validName = nameOf(name);
 	return updateState((state) => {
-		const item = { id: randomUUID(), name: validName, defaultDifficulty: "NORMAL", domainDifficulties: {}, model: null, autoExplain: true };
+		const item = { id: randomUUID(), name: validName, defaultDifficulty: "NORMAL", domainDifficulties: {}, model: null, autoExplain: false };
 		state.profiles.push(item);
 		return item;
 	});

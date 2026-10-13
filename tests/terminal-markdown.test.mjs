@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { createTerminalMarkdown } from "../app/terminal-markdown.mjs";
+import { createTerminalMarkdown, cjkFriendlyEmphasis } from "../app/terminal-markdown.mjs";
 import { createTerminalTheme } from "../app/terminal-theme.mjs";
 import { terminalSafeText } from "../app/terminal-input.mjs";
 
@@ -197,4 +197,61 @@ test("terminal theme adapts SGR color mode to the terminal", () => {
 			assert.match(painted, /\u001b\[38;2;\d+;\d+;\d+m/u);
 		}
 	}
+});
+
+const BOLD_OPEN = "\u001b[1m";
+
+function boldRuns(text, width = 80) {
+	const rows = createTerminalMarkdown(createTerminalTheme(COLOR_ENV)).render(text, width);
+	const joined = rows.join("\n");
+	// Pi가 쓰는 굵게 SGR(1m)로 열고 22m으로 닫는 구간의 글자만 모은다.
+	return { joined, plainText: stripVTControlCharacters(joined), runs: [...joined.matchAll(/\u001b\[1m([\s\S]*?)\u001b\[22m/gu)].map((match) => stripVTControlCharacters(match[1])) };
+}
+
+test("terminal markdown bolds ** next to Hangul when CommonMark flanking would not (ADR 0061)", () => {
+	const cases = [
+		["**`안녕하세요`**를 확인하세요", "안녕하세요", "안녕하세요를 확인하세요"],
+		["**\"문장\"**을 읽습니다", "\"문장\"", "\"문장\"을 읽습니다"],
+		["**(괄호)**는 따로 둡니다", "(괄호)", "(괄호)는 따로 둡니다"],
+		["**안녕.**하세요", "안녕.", "안녕.하세요"],
+		["한글**\"문장\"**을 읽습니다", "\"문장\"", "한글\"문장\"을 읽습니다"],
+		["**「인용」**이라고 합니다", "「인용」", "「인용」이라고 합니다"],
+	];
+	for (const [source, bold, shown] of cases) {
+		const { joined, plainText, runs } = boldRuns(source);
+		assert.ok(joined.includes(BOLD_OPEN), `no bold SGR for ${source}`);
+		assert.ok(runs.some((run) => run.includes(bold)), `bold run missing ${bold} for ${source}: ${JSON.stringify(runs)}`);
+		assert.ok(!plainText.includes("**"), `literal ** left for ${source}: ${plainText}`);
+		assert.ok(!joined.includes("\ufeff"), `marker leaked for ${source}`);
+		assert.equal(plainText.trim(), shown);
+	}
+});
+
+test("terminal markdown CJK emphasis fix keeps single * and wrapping widths intact", () => {
+	const { runs, plainText } = boldRuns("*\"문장\"*을 읽습니다 그리고 **`코드`**를 봅니다", 14);
+	assert.ok(!plainText.includes("*"));
+	assert.ok(runs.some((run) => run.includes("코드")));
+	const rows = createTerminalMarkdown(createTerminalTheme(COLOR_ENV)).render("**`안녕하세요`**를 아주 길게 이어지는 문장입니다", 14);
+	for (const row of rows) assert.ok(visibleWidth(row) <= 14, JSON.stringify(row));
+});
+
+test("terminal markdown CJK emphasis fix leaves ASCII, code spans, and fences unchanged", () => {
+	assert.equal(cjkFriendlyEmphasis("a**b**c and *d*"), "a**b**c and *d*");
+	assert.equal(cjkFriendlyEmphasis("`**안녕.**하세요` 와 \\*\\*안녕.\\*\\*하세요"), "`**안녕.**하세요` 와 \\*\\*안녕.\\*\\*하세요");
+	const fenced = "```md\n**\"문장\"**을\n**안녕.**하세요\n```\n";
+	assert.equal(cjkFriendlyEmphasis(fenced), fenced);
+	const tilde = "~~~\n**안녕.**하세요\n~~~";
+	assert.equal(cjkFriendlyEmphasis(tilde), tilde);
+	// 렌더 결과: ASCII 규칙은 그대로, 코드 범위와 코드 블록 안의 ** 는 글자 그대로 보인다.
+	const ascii = boldRuns("a**b**c");
+	assert.deepEqual(ascii.runs, ["b"]);
+	assert.equal(ascii.plainText.trim(), "abc");
+	const code = boldRuns("`**안녕.**하세요`");
+	assert.equal(code.runs.length, 0);
+	assert.equal(code.plainText.trim(), "**안녕.**하세요");
+	const block = boldRuns(fenced);
+	assert.equal(block.runs.length, 0);
+	assert.ok(block.plainText.includes("**안녕.**하세요"));
+	// 이미 규칙대로 강조되는 문장은 바꾸지 않는다.
+	assert.equal(cjkFriendlyEmphasis("**굵게**와 `코드` 그리고 **둘째**를"), "**굵게**와 `코드` 그리고 **둘째**를");
 });

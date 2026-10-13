@@ -403,3 +403,31 @@ test("an unmatched trigger is not sent until Esc turns it into literal question 
 	await until(async () => (await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body.length === 1);
 	assert.equal((await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body[0].question, "#1 오류가 뭐야");
 });
+
+test("the @ session picker shows the Herdr workspace name on the session card", async (t) => {
+	const f = await fixture(t);
+	// 서버가 붙인 herdr 필드를 대신해 목록 응답에 넣는 얇은 중계. 나머지 요청은 그대로 넘긴다.
+	const proxy = createServer((req, res) => {
+		const upstream = request(new URL(req.url, f.address), { method: req.method, headers: req.headers }, (response) => {
+			if (req.url !== "/api/sessions") { res.writeHead(response.statusCode, response.headers); response.pipe(res); return; }
+			let body = "";
+			response.on("data", (chunk) => { body += chunk; });
+			response.on("end", () => {
+				const list = JSON.parse(body).map((session) => ({ ...session, herdr: { workspace: "w3", label: "워드프레스 리팩터링", number: 3, pane: "w3:p2" } }));
+				res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify(list));
+			});
+		});
+		upstream.on("error", () => res.destroy());
+		req.pipe(upstream);
+	});
+	proxy.listen(0, "127.0.0.1");
+	await once(proxy, "listening");
+	t.after(() => proxy.close());
+	const ui = await terminal(t, `http://127.0.0.1:${proxy.address().port}`);
+	await ui.key("@");
+	assert.match(ui.screen, /워드프레스 리팩터링/, ui.screen);
+	await ui.key("\u0015");
+	await ui.key("@워드");
+	assert.match(ui.screen, /워드프레스 리팩터링/, "the workspace name is searchable");
+});

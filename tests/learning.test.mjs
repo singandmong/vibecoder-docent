@@ -30,6 +30,11 @@ async function finish(request, context, plan) {
 	return learning.applyClassification(context, response.recordId, plan, startedAt);
 }
 
+test("a fresh install starts with pre-explanation off for the default profile and for new profiles", async () => {
+	assert.equal((await learning.profile("default")).autoExplain, false);
+	assert.equal((await learning.createProfile("새 사람")).autoExplain, false);
+});
+
 test("learning preserves profile isolation, explicit feedback, repeat and retry boundaries", async () => {
 	try {
 		const alice = await learning.createProfile("Alice");

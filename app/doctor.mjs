@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ompCommand } from "./omp-bin.mjs";
 
 export const MIN_NODE = "22.19.0";
 
@@ -16,7 +17,8 @@ const newer = (version, minimum) => {
 };
 
 const run = (bin, args, timeout) => new Promise((resolveRun) => {
-	const child = execFile(bin, args, { timeout, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, TERM: "dumb" } }, (error, stdout) => resolveRun(error ? null : String(stdout)));
+	const target = ompCommand(bin, args);
+	const child = execFile(target.command, target.args, { timeout, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, TERM: "dumb" } }, (error, stdout) => resolveRun(error ? null : String(stdout)));
 	child.stdin?.end();
 });
 

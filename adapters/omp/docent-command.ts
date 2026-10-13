@@ -17,7 +17,7 @@ export default function (pi) {
 			} catch {
 				file = undefined;
 			}
-			const args = ["herdr", "--cwd", ctx.cwd];
+			const args = ["herdr", "--split", "--cwd", ctx.cwd];
 			if (typeof file === "string" && file) args.push("--session-file", file);
 			const result = await pi.exec("docent", args, { cwd: ctx.cwd });
 			if (result.code === 0) ctx.ui.notify(result.stdout.trim() || "도슨트를 띄웠어요.", "info");

@@ -87,6 +87,9 @@ test("a user question on a thread whose pre-explanation is still running waits i
 
 test("the server pre-explains a new AI question for a profile that opened the session, even after the tab closes", async (t) => {
 	const f = await fixture(t);
+	// 픽스처의 기본 프로필은 autoExplain 이 없는 0.24 전 파일이라 켜진 채로 남는다. 새로 만든 프로필은 꺼진 채 시작한다 (ADR 0063).
+	assert.equal((await f.api("/api/profiles")).body.find((p) => p.id === "default").autoExplain, true);
+	assert.equal((await f.api("/api/profiles", "POST", { name: "새 프로필" })).body.autoExplain, false);
 	const controller = new AbortController();
 	const response = await fetch(`${f.address}/api/live?id=${encodeURIComponent(f.sessionId)}&profileId=default`, { signal: controller.signal });
 	const reader = response.body.getReader();
@@ -174,7 +177,8 @@ test("Korean text split across output chunks is decoded intact, not stored with 
 	assert.equal(answer.raw.includes("\uFFFD"), false);
 });
 
-test("graceful server shutdown stops its running model and keeps the request cancelled after restart", async (t) => {
+// Windows 의 process.kill 은 신호를 보내지 않고 프로세스를 바로 끝내서 서버의 SIGTERM 종료 처리가 돌지 않는다 (ADR 0057).
+test("graceful server shutdown stops its running model and keeps the request cancelled after restart", { skip: process.platform === "win32" && "Windows 에는 정상 종료 신호가 없어요" }, async (t) => {
 	const f = await fixture(t);
 	await f.control({ slowExplanation: 10000 });
 	const pending = f.stream({ question: "종료 중인 설명", requestId: "shutdown" }).catch(() => null);

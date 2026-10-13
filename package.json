@@ -1,6 +1,6 @@
 {
   "name": "vibecoder-docent",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "private": true,
   "type": "module",
   "main": "app/desktop/main.cjs",
@@ -33,6 +33,7 @@
     "bin",
     "app/*.mjs",
     "!app/build.mjs",
+    "!app/markdown-remark.mjs",
     "app/index.html",
     "app/favicon.svg",
     "app/assets",
@@ -67,6 +68,7 @@
   },
   "devDependencies": {
     "@electron/packager": "20.3.0",
+    "@streamdown/cjk": "1.0.4",
     "electron": "44.5.1",
     "esbuild": "0.28.2",
     "pretendard": "^1.3.9",

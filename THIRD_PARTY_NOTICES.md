@@ -17,14 +17,15 @@ React, react-dom, Streamdown은 빌드 시에만 사용하는 개발 의존성�
 
 터미널 클라이언트(`docent-tui`)는 런타임 의존성 `@earendil-works/pi-tui` 0.99.1(MIT, Mario Zechner)과 그 의존성 `marked`(MIT), `get-east-asian-width`(MIT)를 사용한다. 이 패키지들은 번들하지 않고 tgz 설치 때 npm이 함께 설치하며, 각 패키지에 들어 있는 라이선스를 따른다.
 
-아래 표는 `app/build.mjs`와 같은 설정으로 esbuild의 `metafile: true`를 켜서 조사한 결과다. `outputs["app/assets/docent-markdown.js"].inputs` 중 `bytesInOutput > 0`인 입력 파일을 패키지별로 묶고, 설치된 각 패키지의 `package.json`에 있는 버전·license 필드와 대조했다. 실제 JS 번들에 포함된 91개 패키지만 기재하며, 타입 선언·제거된 코드·esbuild 자체 등 빌드에만 필요하고 출력에 포함되지 않은 패키지는 제외했다. 원래 빌드와 조사용 빌드의 출력이 바이트 단위로 같음을 확인했다.
+아래 표는 `app/build.mjs`와 같은 설정으로 esbuild의 `metafile: true`를 켜서 조사한 결과다. `outputs["app/assets/docent-markdown.js"].inputs` 중 `bytesInOutput > 0`인 입력 파일을 패키지별로 묶고, 설치된 각 패키지의 `package.json`에 있는 버전·license 필드와 대조했다. 실제 JS 번들에 포함된 101개 패키지만 기재하며, 타입 선언·제거된 코드·esbuild 자체 등 빌드에만 필요하고 출력에 포함되지 않은 패키지는 제외했다. 원래 빌드와 조사용 빌드의 출력이 바이트 단위로 같음을 확인했다.
 
-React, react-dom과 scheduler는 MIT, Streamdown과 remend는 Apache-2.0이다. 나머지는 표에 표시한 MIT, ISC, BSD-2-Clause 라이선스를 따른다. 실제 조건은 아래 원문을 따른다.
+React, react-dom과 scheduler는 MIT, Streamdown, `@streamdown/cjk`와 remend는 Apache-2.0이다. 나머지는 표에 표시한 MIT, ISC, BSD-2-Clause 라이선스를 따른다. 실제 조건은 아래 원문을 따른다.
 
 `app/assets/docent-markdown.js` 끝의 `Bundled license information`에는 React, react-dom, scheduler와 JSX 런타임의 저작권 고지가 보존되어 있다. 번들 주석에 없는 고지도 보존하도록 표에 기재한 모든 패키지의 라이선스 원문을 아래에 수록한다. 조사한 패키지 루트에는 별도의 NOTICE 파일이 없었다.
 
 | 패키지 | 버전 | 라이선스 |
 | --- | --- | --- |
+| `@streamdown/cjk` | 1.0.4 | Apache-2.0 |
 | `@ungap/structured-clone` | 1.4.0 | ISC |
 | `bail` | 2.0.2 | MIT |
 | `ccount` | 2.0.1 | MIT |
@@ -35,6 +36,7 @@ React, react-dom과 scheduler는 MIT, Streamdown과 remend는 Apache-2.0이다. 
 | `escape-string-regexp` | 5.0.0 | MIT |
 | `estree-util-is-identifier-name` | 3.0.0 | MIT |
 | `extend` | 3.0.2 | MIT |
+| `get-east-asian-width` | 1.6.0 | MIT |
 | `hast-util-from-parse5` | 8.0.3 | MIT |
 | `hast-util-parse-selector` | 4.0.0 | MIT |
 | `hast-util-raw` | 9.1.0 | MIT |
@@ -61,9 +63,14 @@ React, react-dom과 scheduler는 MIT, Streamdown과 remend는 Apache-2.0이다. 
 | `mdast-util-phrasing` | 4.1.0 | MIT |
 | `mdast-util-to-hast` | 13.2.1 | MIT |
 | `mdast-util-to-markdown` | 2.1.2 | MIT |
+| `mdast-util-to-markdown-cjk-friendly` | 1.0.0 | MIT |
+| `mdast-util-to-markdown-cjk-friendly-gfm-strikethrough` | 1.0.0 | MIT |
 | `mdast-util-to-string` | 4.0.0 | MIT |
 | `micromark` | 4.0.2 | MIT |
 | `micromark-core-commonmark` | 2.0.3 | MIT |
+| `micromark-extension-cjk-friendly` | 2.0.2 | MIT |
+| `micromark-extension-cjk-friendly-gfm-strikethrough` | 2.0.1 | MIT |
+| `micromark-extension-cjk-friendly-util` | 3.0.1 | MIT |
 | `micromark-extension-gfm` | 3.0.0 | MIT |
 | `micromark-extension-gfm-autolink-literal` | 2.1.0 | MIT |
 | `micromark-extension-gfm-footnote` | 2.1.0 | MIT |
@@ -86,6 +93,7 @@ React, react-dom과 scheduler는 MIT, Streamdown과 remend는 Apache-2.0이다. 
 | `micromark-util-resolve-all` | 2.0.1 | MIT |
 | `micromark-util-sanitize-uri` | 2.0.1 | MIT |
 | `micromark-util-subtokenize` | 2.1.0 | MIT |
+| `micromark-util-symbol` | 2.0.1 | MIT |
 | `parse5` | 7.3.0 | MIT |
 | `property-information` | 7.2.0 | MIT |
 | `react` | 19.3.0 | MIT |
@@ -93,6 +101,8 @@ React, react-dom과 scheduler는 MIT, Streamdown과 remend는 Apache-2.0이다. 
 | `rehype-harden` | 1.1.8 | MIT |
 | `rehype-raw` | 7.0.0 | MIT |
 | `rehype-sanitize` | 6.0.0 | MIT |
+| `remark-cjk-friendly` | 2.3.2 | MIT |
+| `remark-cjk-friendly-gfm-strikethrough` | 2.3.1 | MIT |
 | `remark-gfm` | 4.0.1 | MIT |
 | `remark-parse` | 11.0.0 | MIT |
 | `remark-rehype` | 11.1.2 | MIT |
@@ -493,7 +503,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### remend@1.3.1, streamdown@2.6.0
+### @streamdown/cjk@1.0.4, remend@1.3.1, streamdown@2.6.0
 
 ```text
 Copyright 2023 Vercel, Inc.
@@ -748,6 +758,179 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+### micromark-util-symbol@2.0.1
+
+```text
+(The MIT License)
+
+Copyright (c) Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### get-east-asian-width@1.6.0
+
+```text
+MIT License
+
+Copyright (c) Sindre Sorhus <sindresorhus@gmail.com> (https://sindresorhus.com)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### mdast-util-to-markdown-cjk-friendly@1.0.0, mdast-util-to-markdown-cjk-friendly-gfm-strikethrough@1.0.0, remark-cjk-friendly@2.3.2, remark-cjk-friendly-gfm-strikethrough@2.3.1
+
+```text
+Copyright (c) 2025 Tatsunori Uchino <tats.u@live.jp>
+
+MIT LICENSE
+
+Based on remark-gfm:
+
+(The MIT License)
+
+Copyright (c) Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### micromark-extension-cjk-friendly@2.0.2
+
+```text
+Copyright (c) 2025 Tatsunori Uchino <tats.u@live.jp>
+
+MIT LICENSE
+
+Based on micromark and micromark-core-commonmark
+
+(The MIT License)
+
+Copyright (c) Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### micromark-extension-cjk-friendly-gfm-strikethrough@2.0.1
+
+```text
+Copyright (c) 2025 Tatsunori Uchino <tats.u@live.jp>
+
+MIT LICENSE
+
+Based on micromark and micromark-core-commonmark & micromark-extension-gfm-strikethrough
+
+(The MIT License)
+
+Copyright (c) Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### micromark-extension-cjk-friendly-util@3.0.1
+
+```text
+Copyright (c) 2025 Tatsunori Uchino <tats.u@live.jp>
+
+MIT LICENSE
+
+Based on micromark's sub-packages (micromark-util-character, micromark-util-symbol, and micromark-util-classify-character)
+
+(The MIT License)
+
+Copyright (c) Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### marked@17.0.6

@@ -45,8 +45,4 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # 가짜 omp, herdr 를 shebang 스크립트로 만들어 서버에 물리는 테스트는 Windows 에서 실행할 수 없어 뺀다.
-      # server-process 테스트가 실제 `docent start` 로 Windows 의 서버 시작과 세션 id 를 확인한다.
-      - name: Tests without POSIX script fixtures
-        shell: bash
-        run: node --test $(ls tests/*.test.mjs | grep -v -E '/(ask|doctor|herdr-launch|models|terminal)\.test\.mjs$')
+      - run: node --test tests/*.test.mjs

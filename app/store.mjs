@@ -14,9 +14,24 @@ const STATE_FILE = join(DOCENT_HOME, "learning.json");
 const RUN_ID = randomUUID();
 let writes = Promise.resolve();
 
+/**
+ * 임시 파일로 원본을 바꾼다. Windows 는 대상 파일을 백신, 인덱서나 방금 읽은 핸들이 잠시 잡고 있으면 rename 이 EPERM, EACCES, EBUSY 로 실패한다.
+ * 잠금은 곧 풀리므로 짧게 다시 시도한다. 다른 오류와 POSIX 에서는 첫 실패를 그대로 던진다 (ADR 0062).
+ */
+async function replaceFile(temp, target) {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			return await rename(temp, target);
+		} catch (error) {
+			if (process.platform !== "win32" || !["EPERM", "EACCES", "EBUSY"].includes(error.code) || attempt >= 20) throw error;
+			await new Promise((resolve) => setTimeout(resolve, 10 + attempt * 10));
+		}
+	}
+}
+
 const emptyState = () => ({
 	version: 1,
-	profiles: [{ id: "default", name: "기본", defaultDifficulty: "NORMAL", domainDifficulties: {}, model: null, autoExplain: true }],
+	profiles: [{ id: "default", name: "기본", defaultDifficulty: "NORMAL", domainDifficulties: {}, model: null, autoExplain: false }],
 	items: [],
 	records: [],
 	requests: {},
@@ -61,6 +76,7 @@ export async function readState() {
 	if (state.version !== 1 || !Array.isArray(state.profiles) || !state.profiles.some((p) => p.id === "default") || !Array.isArray(state.items) || !Array.isArray(state.records) || !state.requests || typeof state.requests !== "object" || Array.isArray(state.requests)) {
 		throw new Error("학습 저장 파일 형식이 올바르지 않아요. 기존 파일을 보존하고 읽기를 중단했어요.");
 	}
+	// autoExplain 이 없는 프로필은 0.24 전에 만든 것이다. 그때 기본값이 켜짐이었으니 켜진 채로 둔다 (ADR 0063).
 	for (const profile of state.profiles) {
 		profile.model ??= null;
 		profile.autoExplain ??= true;
@@ -83,7 +99,7 @@ export function updateState(change) {
 			} finally {
 				await file.close();
 			}
-			await rename(temp, STATE_FILE);
+			await replaceFile(temp, STATE_FILE);
 		} finally {
 			await rm(temp, { force: true });
 		}
@@ -266,7 +282,7 @@ export async function saveConfig(patch) {
 		} finally {
 			await file.close();
 		}
-		await rename(temp, path);
+		await replaceFile(temp, path);
 	} finally {
 		await rm(temp, { force: true });
 	}

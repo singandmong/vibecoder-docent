@@ -174,3 +174,30 @@ test("live watch goes to the session file here and to the peer's live stream the
 	assert.deepEqual(remote, frames);
 	assert.deepEqual(peer.calls, ["http://book.test/api/live?id=claude%3Aa%2Fs.jsonl"]);
 });
+
+test("sessions open in Herdr come first by workspace and pane, even past the 200 limit; peers keep their own herdr field; no herdr data leaves the order unchanged", async (t) => {
+	const at = (number, pane) => ({ workspace: `w${number}`, label: `공간 ${number}`, number, pane: `w${number}:p${pane}` });
+	const files = {};
+	for (const [name, updated] of [["a", "2026-10-05"], ["b", "2026-10-04"], ["c", "2026-10-03"], ["d", "2026-10-02"], ["e", "2026-10-01"]]) {
+		files[`.claude/projects/p/${name}.jsonl`] = [claudeSession("/w/x", `세션 ${name}`), `${updated}T00:00:00Z`];
+	}
+	const dir = await home(t, files);
+	const path = (name) => join(dir, `.claude/projects/p/${name}.jsonl`);
+	const open = new Map([[path("c"), at(1, 1)], [path("a"), at(3, 2)], [path("e"), at(3, 1)]]);
+	const peer = fakePeer({ "/api/sessions": [
+		{ id: "claude:p/r1.jsonl", provider: "claude", title: "원격 Herdr", updated: "2026-10-06T00:00:00Z", host: null, herdr: at(1, 1) },
+		{ id: "claude:p/r2.jsonl", provider: "claude", title: "원격 일반", updated: "2026-10-07T00:00:00Z", host: null },
+	] });
+	const make = (herdr) => sessionCatalog([...localProviders(adapters, { home: dir, herdr }), peerProvider("book", "http://book.test", { fetch: peer.fetch })]);
+	const listed = await make({ sessions: async () => open }).list();
+	assert.deepEqual(listed.map((s) => s.id), [
+		"claude:p/c.jsonl", "claude:p/e.jsonl", "claude:p/a.jsonl", "@book/claude:p/r1.jsonl", "@book/claude:p/r2.jsonl", "claude:p/b.jsonl", "claude:p/d.jsonl",
+	]);
+	assert.deepEqual(listed[0].herdr, at(1, 1));
+	assert.equal(listed.find((s) => s.id === "claude:p/b.jsonl").herdr, undefined);
+	assert.deepEqual(listed[3].herdr, at(1, 1), "a peer's herdr field is passed through as sent");
+	const none = (await make({ sessions: async () => new Map() }).list()).map((s) => s.id);
+	const without = (await make(null).list()).map((s) => s.id);
+	assert.deepEqual(none, without);
+	assert.deepEqual(without, ["@book/claude:p/r1.jsonl", "@book/claude:p/r2.jsonl", "claude:p/a.jsonl", "claude:p/b.jsonl", "claude:p/c.jsonl", "claude:p/d.jsonl", "claude:p/e.jsonl"]);
+});

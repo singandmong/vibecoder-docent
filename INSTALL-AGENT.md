@@ -147,7 +147,7 @@ docent doctor --probe
 | 고른 것 | 할 일 |
 |---|---|
 | 브라우저 | `docent` 실행. 이미 켜진 서버에 브라우저만 연다 |
-| 터미널 | 사용법 안내: 다른 터미널 창에서 `docent-tui`. Herdr 창 안이면 `docent herdr`로 오른쪽 창에 바로 띄울 수 있다고 알린다. 호스트가 omp면 `docent install-omp`로 서브에이전트 정의와 `/docent` 명령을 설치하고, 새 omp 세션에서 `/docent`를 쓰라고 안내한다. `/docent`는 Herdr 창 안에서만 동작하므로 Herdr를 쓰지 않으면(Windows 포함) `docent-tui`를 쓰라고 알린다 |
+| 터미널 | 사용법 안내: 다른 터미널 창에서 `docent-tui`, 또는 지금 터미널에서 `docent herdr`로 그 자리에서 연다. Herdr 창 안이면 `docent herdr --split`로 오른쪽 창에 띄울 수 있다고 알린다. 호스트가 omp면 `docent install-omp`로 서브에이전트 정의와 `/docent` 명령을 설치하고, 새 omp 세션에서 `/docent`를 쓰라고 안내한다. `/docent`는 Herdr 창 안에서만 동작하므로 Herdr를 쓰지 않으면(Windows 포함) `docent-tui`를 쓰라고 알린다 |
 | 휴대폰 | `docent-mobile`로 상태 확인. Tailscale이 없거나 로그인 전이면 그 방법을 안내한다. 준비되면 질문 도구로 **"휴대폰 공유를 지금 켤까요?"** (켜기 (추천) / 나중에)를 묻고, 켜기면 `docent-mobile --enable`. 안내된 HTTPS 주소를 휴대폰에서 열고 홈 화면에 추가하게 한다 |
 | macOS 앱 | 저장소를 내려받아 `npm ci && npm run build:macos`. 서명되지 않은 앱이라 처음 열 때 macOS가 확인을 요구할 수 있다고 알린다 |
 | Jev 설정 방법 보기 | 셸 설정 파일에 `export TYPESAFE_API_KEY=...`를 사용자가 직접 넣고 서버를 다시 켜라고 안내한다 |
@@ -163,6 +163,7 @@ docent doctor --probe
 - 설치한 도슨트 버전과 서버 주소
 - 읽을 수 있는 세션 수 (`docent doctor` 결과)
 - 쓰는 법 세 줄: 세션을 고른다 → 작업 내용 카드를 누른다 → 궁금한 것을 묻는다
+- 새 사건을 미리 쉽게 설명해 두는 미리 설명은 꺼진 채 시작한다는 것. 원하면 웹 설정의 "새 주요 내용 자동 설명"이나 터미널 `$` 설정의 "미리 설명 켜기"로 켜고, 켜면 모델 호출 비용이 든다
 - 컴퓨터를 다시 켠 뒤에는 터미널에서 `docent start`로 켜고 `docent`로 브라우저를 연다는 것
 
 ## 문제 해결

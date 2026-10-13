@@ -17,8 +17,8 @@ const selectedProfileId = (profile) => profile?.id || "default";
 const placeOf = (session) => (session.repo && session.project && session.repo !== session.project ? `${session.repo}/${session.project}` : session.project || session.repo || "");
 /** 세션 카드 아이콘. DOCENT_SYMBOLS=ascii 또는 TERM=dumb 에서는 ASCII (ADR 0045). */
 const SESSION_ICONS = Object.freeze({
-	unicode: Object.freeze({ repo: "📦", folder: "📁", branch: "🌿", worktree: "🌳", recent: "🕘", current: "✓" }),
-	ascii: Object.freeze({ repo: "[R]", folder: "[D]", branch: "br:", worktree: "wt:", recent: ">", current: "*" }),
+	unicode: Object.freeze({ repo: "📦", folder: "📁", branch: "🌿", worktree: "🌳", recent: "🕘", current: "✓", workspace: "🔖" }),
+	ascii: Object.freeze({ repo: "[R]", folder: "[D]", branch: "br:", worktree: "wt:", recent: ">", current: "*", workspace: "ws:" }),
 });
 
 /** 목록에서 고르기 쉬운 상대 시각. 일주일이 넘으면 날짜. */
@@ -231,6 +231,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			session.repo
 				? theme.span("title", `${icons.repo} ${clipLine(session.repo, 28)}`)
 				: theme.span("path", `${icons.folder} ${clipLine(session.project || "작업 폴더 없음", 28)}`),
+			session.herdr && theme.span("label", `${icons.workspace} ${clipLine(session.herdr.label || `작업 공간 ${session.herdr.number}`, 24)}`),
 			session.branch && theme.span("success", `${icons.branch} ${clipLine(session.branch, 32)}${session.detached ? " (브랜치 아님)" : ""}`),
 			session.worktree && theme.span("label", `${icons.worktree} ${clipLine(session.worktree, 24)}`),
 			current && theme.span("success", icons.current),
@@ -629,7 +630,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	function sessionItems() {
 		return state.sessions.map((session) => ({
 			label: session.title || "제목 없음",
-			aliases: `${session.repo ?? ""} ${session.project ?? ""} ${session.worktree ?? ""} ${session.branch ?? ""} ${session.provider ?? ""} ${session.host ?? ""}`,
+			aliases: `${session.repo ?? ""} ${session.project ?? ""} ${session.worktree ?? ""} ${session.branch ?? ""} ${session.provider ?? ""} ${session.host ?? ""} ${session.herdr?.label ?? ""}`,
 			description: session.recent ?? "",
 			card: (selected) => sessionCard(session, selected, session.id === state.session?.id),
 			current: session.id === state.session?.id,
