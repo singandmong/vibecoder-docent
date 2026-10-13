@@ -19,7 +19,7 @@
 - 어댑터(`adapters/<host>/`)는 프론트매터와 설치 방법만. 프롬프트 본문을 복사하지 않는다.
 - 런타임 코드는 `bin/`(CLI), `app/`(서버·웹·터미널·데스크톱), `scripts/`뿐. 웹 기반 설명 표시에는 Streamdown·React와 로컬 빌드를 사용한다. 자산은 패키지에 포함하고 실행 중 CDN은 사용하지 않는다 (ADR 0015·0037).
 - 새 결정은 `docs/decisions/NNNN-*.md` 로 남긴다. 문서 안에서 결정을 번복하지 않는다.
-- 코어를 고치면 `scripts/install-omp.sh` 를 다시 실행한다.
+- 코어나 omp 확장을 고치면 `node bin/docent.mjs install-omp` 를 다시 실행한다.
 - 학습 기억은 사용자·개념·범위를 구분한다. EASY/NORMAL/HARD는 선호이며 능력 등급이 아니다. 근거·저장·PiP 계약은 ADR 0014를 따른다.
 - 화면(CSS, 레이아웃, 여백, 버튼 배치)을 고치면 글자, 여백, 정렬을 검사한다. 이 프로젝트의 규칙과 명령은 `docs/design-check.md`, 공통 절차는 전역 스킬 `jev-design-check`. 관리자 기기에서는 `~/SERVICES/docent/jev-env npm run check:design`으로 Jev 판정까지 통과시킨다(키 위치와 기기별 주의는 `~/SERVICES/docent/README.md`). 그 밖의 환경에서는 `TYPESAFE_API_KEY`를 환경변수로만 넣는다. "Jev로 검사했다"는 키를 넣은 실행 결과일 때만 말한다. 화면 문구에 가운데 점과 엠 대시를 쓰지 않는다.
 

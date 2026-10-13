@@ -17,13 +17,15 @@ const clip = (s, max) => (s.length > max ? `${s.slice(0, max)}\n…(잘림)` : s
 
 // 사용자 메시지 블록 중 Codex 가 주입한 컨텍스트. 진짜 발화만 남긴다.
 const INJECTED = /^(<environment_context>|<recommended_plugins>|<user_instructions>|<skill>|# AGENTS\.md instructions|<image[\s>]|<\/image>)/;
+// Codex 앱은 발화 앞에 `<external_codex_apps_open_page>…</external_codex_apps_open_page>` 같은 snake_case 감싼 블록을 붙인다. 발화가 아니라 앞에서 걷어 낸다.
+const WRAPPER_PREFIX = /^(?:<([a-z]+(?:_[a-z]+)+)>[\s\S]*?<\/\1>\s*)+/;
 
 /** 사용자 메시지 payload 에서 실제 발화 텍스트만 모은다. 없으면 null. */
 const userText = (payload) => {
 	const parts = [];
 	for (const b of payload?.content ?? []) {
 		if (b?.type !== "input_text" && b?.type !== "text") continue;
-		let t = (b.text ?? "").trim();
+		let t = (b.text ?? "").trim().replace(WRAPPER_PREFIX, "");
 		if (!t) continue;
 		if (INJECTED.test(t)) continue;
 		if (t.startsWith("# Files mentioned by the user:")) {

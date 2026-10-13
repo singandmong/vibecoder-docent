@@ -13,6 +13,9 @@ term은 짧은 단어 그대로(최대 40자), gloss는 그 단어의 뜻을 쉬
 
 export const PLANNING_KEYWORDS_RULE = `keywords는 이 질문과 답의 맥락에서 비개발자가 용어 사전처럼 다시 찾아볼 핵심 기술 단어 최대 ${MAX_KEYWORDS}개다. 제품, 도구, 서비스 이름, 표준 용어, 개발 개념(예: PRD, staging, production, Doppler, config, token)을 짧은 단어 그대로 쓴다(최대 40자). 문장형 개념명, 작업명, 일상어는 넣지 않는다. gloss는 단어 자체의 뜻을 쉬운 한국어 한 문장(최대 80자)으로 쓴다. 없으면 [].`;
 
+/** 사전에 넣을 단어인가. 한 글자 한글 낱말(개, 줄, 번 같은 단위와 일상어)은 기술 용어가 아니고, 화면에서는 거의 모든 답의 글자와 겹쳐 보인다. */
+const glossaryTerm = (term) => !/^[\uAC00-\uD7A3]$/.test(term);
+
 /** 모델 출력의 keywords 배열을 검증한다. 잘못된 항목은 건너뛰고, 배열이 아니면 null. */
 export function parseKeywords(value) {
 	if (!Array.isArray(value)) return null;
@@ -22,7 +25,7 @@ export function parseKeywords(value) {
 		if (!entry || typeof entry !== "object") continue;
 		const term = typeof entry.term === "string" ? entry.term.trim() : "";
 		const gloss = typeof entry.gloss === "string" ? entry.gloss.trim() : "";
-		if (!term || term.length > 40 || !gloss || gloss.length > 160) continue;
+		if (!term || term.length > 40 || !glossaryTerm(term) || !gloss || gloss.length > 160) continue;
 		const key = term.toLowerCase();
 		if (seen.has(key)) continue;
 		seen.add(key);
@@ -58,6 +61,8 @@ export function wiki(rows) {
 		const id = rowKey(row);
 		const context = { id, sessionId: row.sessionId ?? null, ts: row.ts, auto: Boolean(row.auto), question: String(row.question ?? "").slice(0, 300), headline: plainLine(row.answer.headline) || plainLine(row.answer.raw), code: firstCode(row.answer.raw) };
 		for (const { term, gloss } of row.keywords) {
+			// 이 규칙 전에 저장된 한 글자 낱말도 사전에 올리지 않는다.
+			if (!glossaryTerm(term)) continue;
 			const key = term.toLowerCase();
 			let entry = map.get(key);
 			if (!entry) map.set(key, (entry = { term, gloss, count: 0, lastSeen: row.ts, contexts: [] }));

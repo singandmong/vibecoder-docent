@@ -18,7 +18,8 @@ export async function gitLocationOf(cwd) {
 			const text = await readFile(git, "utf8").catch(() => "");
 			const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(text)?.[1];
 			const gitdir = pointer ? resolve(dir, pointer) : null;
-			const common = gitdir && /^(.+)\/worktrees\/[^/]+\/?$/.exec(gitdir)?.[1];
+			// resolve 는 Windows 에서 `\` 경로를 돌려준다. 두 구분자를 모두 받는다.
+			const common = gitdir && /^(.+)[\\/]worktrees[\\/][^\\/]+[\\/]?$/.exec(gitdir)?.[1];
 			if (!common) return { repo: basename(dir), worktree: null, gitdir };
 			const repo = basename(common) === ".git" ? basename(dirname(common)) : basename(common).replace(/\.git$/, "");
 			return { repo, worktree: basename(dir), gitdir };

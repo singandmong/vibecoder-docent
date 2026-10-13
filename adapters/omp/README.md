@@ -3,11 +3,11 @@
 ## 설치
 
 ```sh
-scripts/install-omp.sh            # → ~/.omp/agent/agents/vibecoder-docent.md, ~/.omp/agent/extensions/vibecoder-docent-command.ts
-scripts/install-omp.sh --project  # → ./.omp/agents/, ./.omp/extensions/ (현재 폴더에서만)
+docent install-omp            # → ~/.omp/agent/agents/vibecoder-docent.md, ~/.omp/agent/extensions/vibecoder-docent-command.ts
+docent install-omp --project  # → ./.omp/agents/, ./.omp/extensions/ (현재 폴더에서만)
 ```
 
-`frontmatter.md` + `../../prompt/docent.md` 를 이어 붙이고, `docent-command.ts` 확장을 복사한다. 코어나 확장을 고치면 다시 실행. 설치한 패키지에서는 `sh "$(npm root -g)/vibecoder-docent/scripts/install-omp.sh"`.
+`frontmatter.md` + `../../prompt/docent.md` 를 이어 붙이고, `docent-command.ts` 확장을 복사한다(`app/install-omp.mjs`). 셸을 쓰지 않아 macOS, Linux, Windows PowerShell 에서 같은 명령이다. 코어나 확장을 고치면 다시 실행. 저장소에서는 `node bin/docent.mjs install-omp`.
 
 ## `/docent` (Herdr)
 

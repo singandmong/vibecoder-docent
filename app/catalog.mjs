@@ -11,7 +11,7 @@
 //   watch(sessionId, send)  라이브 사건을 send 로 흘리고 stop 을 돌려준다
 //   idOf(path)              이 컴퓨터의 파일 경로가 이 제공자 목록의 세션이면 그 id, 아니면 null
 import { readdir, readFile, stat } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { httpError } from "./errors.mjs";
 import { watchSession } from "./live.mjs";
 import { gitLocationOf, headOf } from "./repo.mjs";
@@ -60,10 +60,13 @@ function localProvider(adapter, { home, transcripts, placeOf }) {
 	};
 	/** 목록이 보는 자리인가: root 아래 `depth` 단계 폴더 안에 있고 이름이 `match` 와 맞는 파일. 목록, id → 경로, 경로 → id 가 같은 규칙을 쓴다. */
 	const listable = (path) => {
-		if (!path.startsWith(`${root}/`)) return false;
-		const parts = path.slice(root.length + 1).split("/");
-		return parts.length === depth + 1 && match.test(parts[depth]);
+		const rel = relative(root, path);
+		if (!rel || isAbsolute(rel)) return false;
+		const parts = rel.split(sep);
+		return parts[0] !== ".." && parts.length === depth + 1 && match.test(parts[depth]);
 	};
+	/** root 기준 상대 경로. 세션 id 에는 운영체제와 관계없이 `/` 로 쓴다(Windows 경로의 `\` 도 `/`). */
+	const relOf = (path) => relative(root, path).split(sep).join("/");
 	/** 세션 id → 파일 경로. id 는 `<제공자>:<root 기준 상대 경로>` 이다. */
 	const pathOf = (sid) => {
 		const path = resolve(root, sid.slice(id.length + 1));
@@ -98,7 +101,7 @@ function localProvider(adapter, { home, transcripts, placeOf }) {
 					metas.set(path, { mtimeMs: st.mtimeMs, size: st.size, full: st.size >= headBytes, m });
 				}
 				if (!m) continue;
-				const rel = path.slice(root.length + 1);
+				const rel = relOf(path);
 				out.push({
 					id: `${id}:${rel}`,
 					provider: id,
@@ -147,7 +150,7 @@ function localProvider(adapter, { home, transcripts, placeOf }) {
 			if (!listable(path)) return null;
 			const st = await stat(path).catch(() => null);
 			if (!st?.isFile() || !st.size) return null;
-			return `${id}:${path.slice(root.length + 1)}`;
+			return `${id}:${relOf(path)}`;
 		},
 	};
 }

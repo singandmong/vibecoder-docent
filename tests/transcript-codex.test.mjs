@@ -110,6 +110,20 @@ test("codex meta unwraps files-mentioned wrapper to the request", () => {
 	assert.equal(meta.title, "이 문서 요약해줘");
 });
 
+test("codex app page wrapper in front of the request is neither the title nor transcript text", () => {
+	const app = [
+		sessionMeta,
+		userMessage('<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>\n이 컴퓨터 부팅하면 느려지는데 원인 파악좀'),
+		assistantMessage("시작 프로그램부터 확인하겠습니다."),
+	];
+	const meta = codexAdapter.meta(jsonl(app));
+	assert.equal(meta.title, "이 컴퓨터 부팅하면 느려지는데 원인 파악좀");
+	assert.equal(meta.first, "이 컴퓨터 부팅하면 느려지는데 원인 파악좀");
+	const md = codexAdapter.transcript(jsonl(app), "codex:test/rollout.jsonl");
+	assert.match(md, /^# 이 컴퓨터 부팅하면 느려지는데 원인 파악좀/);
+	assert.ok(!md.includes("external_codex_apps_open_page"));
+});
+
 test("codex events extract user, assistant, error and done", () => {
 	const events = codexAdapter.events(jsonl(fixture));
 	const kinds = events.map((e) => e.kind);

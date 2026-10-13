@@ -205,7 +205,7 @@ const handler = async (req, res) => {
 	// Personal records must never enter browser/proxy caches, including PWA use.
 	if (url.pathname.startsWith("/api/")) res.setHeader("cache-control", "no-store");
 	try {
-		if (req.method === "GET" && url.pathname === "/api/health") return json(res, 200, { app: "vibecoder-docent", version: VERSION });
+		if (req.method === "GET" && url.pathname === "/api/health") return json(res, 200, { app: "vibecoder-docent", version: VERSION, pid: process.pid });
 		if (req.method === "GET" && url.pathname === "/") {
 			res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
 			// 화면의 버전 표시 칸을 package.json 버전으로 채운다.

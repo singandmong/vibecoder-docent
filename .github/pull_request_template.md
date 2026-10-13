@@ -11,7 +11,7 @@
 - [ ] `node --test tests/*.test.mjs` 통과
 - [ ] 서버를 띄워 바뀐 경로를 실제로 써 봤다. 확인한 방법: <!-- 예: 세션 열고 카드 클릭 → 답 도착까지 -->
 - [ ] 프런트엔드(`app/markdown.jsx` 등)를 고쳤으면 `npm run build`를 돌리고 `app/assets/` 변경분을 함께 커밋했다
-- [ ] `prompt/docent.md`를 고쳤으면 `scripts/install-omp.sh` 재실행이 필요하다는 점을 README·설치 안내에 반영했다 (코어는 호스트·도구·경로 이름을 쓰지 않는다)
+- [ ] `prompt/docent.md`를 고쳤으면 `docent install-omp` 재실행이 필요하다는 점을 README·설치 안내에 반영했다 (코어는 호스트·도구·경로 이름을 쓰지 않는다)
 - [ ] `CHANGELOG.md`에 항목을 추가했다
 - [ ] 결정을 바꾸는 변경이면 `docs/decisions/`에 새 ADR을 썼다 (기존 ADR의 결론을 문서에서 조용히 뒤집지 않는다)
 - [ ] 비밀값, 개인 세션 기록, 개인 경로가 코드·문서·스크린샷에 들어가지 않았다

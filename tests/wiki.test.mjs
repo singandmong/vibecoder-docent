@@ -20,6 +20,12 @@ test("keywords merge case-insensitively, keep the newest gloss and count every m
 	assert.deepEqual(Object.keys(data.answers).sort(), ["a", "b"]);
 });
 
+test("a one-syllable Korean word is never a glossary term, new or already stored", () => {
+	assert.deepEqual(parseKeywords([{ term: "개", gloss: "물건을 세는 단위" }, { term: "스왑", gloss: "디스크를 메모리처럼 쓰는 것" }, { term: "C", gloss: "프로그래밍 언어" }]).map((entry) => entry.term), ["스왑", "C"]);
+	const data = wiki([row("a", "2026-09-01", [{ term: "개", gloss: "매주 자동 삭제할 범위" }, { term: "colima", gloss: "맥의 컨테이너용 가상머신 도구" }])]);
+	assert.deepEqual(data.entries.map((entry) => entry.term), ["colima"]);
+});
+
 test("model keyword output is validated and extraction only accepts requested ids", () => {
 	assert.deepEqual(parseKeywords([{ term: " API ", gloss: "프로그램끼리 대화하는 약속" }, { term: "api", gloss: "중복" }, { term: "", gloss: "x" }, "bad"]), [{ term: "API", gloss: "프로그램끼리 대화하는 약속" }]);
 	assert.equal(parseKeywords("nope"), null);

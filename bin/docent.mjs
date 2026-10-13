@@ -29,6 +29,45 @@ if (args[0] === "doctor") {
 	console.log(rest.includes("--json") ? JSON.stringify(report, null, 2) : formatReport(report));
 	process.exit(report.ok ? 0 : 1);
 }
+if (args[0] === "start" || args[0] === "stop") {
+	const [command, ...rest] = args;
+	const usage = command === "start" ? "usage: docent start [--port N] [--host <ip|tailscale>] [--peer 이름=URL ...]" : "usage: docent stop [--port N]";
+	const known = new Set(command === "start" ? ["--port", "--host", "--peer"] : ["--port"]);
+	const unknown = rest.find((arg, i) => !known.has(arg) && !known.has(rest[i - 1]));
+	const missingValue = rest.some((arg, i) => known.has(arg) && (rest[i + 1] === undefined || known.has(rest[i + 1])));
+	if (unknown || missingValue) {
+		console.error(`docent ${command}: ${unknown ? `알 수 없는 옵션이에요: ${unknown}` : "옵션 뒤에 값이 필요해요."}\n${usage}`);
+		process.exit(2);
+	}
+	const { config } = await import("../app/store.mjs");
+	const port = Number(rest.includes("--port") ? rest[rest.indexOf("--port") + 1] : process.env.DOCENT_PORT ?? (await config()).port ?? 4747);
+	if (!Number.isInteger(port) || port < 1 || port > 65535) {
+		console.error(`docent ${command}: 포트는 1에서 65535 사이 정수여야 해요.`);
+		process.exit(2);
+	}
+	const { startServer, stopServer } = await import("../app/server-process.mjs");
+	try {
+		if (command === "start") {
+			const result = await startServer({ port, args: rest.filter((arg, i) => arg !== "--port" && rest[i - 1] !== "--port") });
+			console.log(result.started
+				? `docent: 백그라운드로 켰어요 → ${result.url}\n  기록: ${result.log}\n  끄기: docent stop`
+				: `docent: 이미 켜져 있어요 → ${result.url}`);
+			process.exit(0);
+		}
+		const result = await stopServer({ port });
+		if (result.reason === "no-pid") {
+			console.error(`docent stop: ${result.url} 의 서버는 0.23.0 이전 버전이라 이 명령으로 끌 수 없어요. 서버를 켠 창에서 Ctrl+C 로 끄세요.`);
+			process.exit(1);
+		}
+		console.log(result.reason === "not-running" ? `docent: 켜져 있는 서버가 없어요 → ${result.url}`
+			: result.reason === "restarted" ? `docent: 서버를 껐지만 바로 다시 켜졌어요 → ${result.url}\n  launchd 같은 서비스 관리자가 다시 띄운 것 같아요. 그 서비스에서 멈추세요.`
+			: `docent: 서버를 껐어요 → ${result.url}`);
+		process.exit(0);
+	} catch (error) {
+		console.error(`docent ${command}: ${error.message}`);
+		process.exit(1);
+	}
+}
 if (args[0] === "herdr") {
 	const rest = args.slice(1);
 	const value = (name) => (rest.includes(name) ? rest[rest.indexOf(name) + 1] : undefined);
@@ -57,12 +96,26 @@ if (args[0] === "herdr") {
 		process.exit(error.code === "NOT_HERDR" ? 2 : 1);
 	}
 }
+if (args[0] === "install-omp") {
+	const unknown = args.slice(1).find((arg) => arg !== "--project");
+	if (unknown) {
+		console.error(`docent install-omp: 알 수 없는 옵션이에요: ${unknown}\nusage: docent install-omp [--project]`);
+		process.exit(2);
+	}
+	const { installOmp } = await import("../app/install-omp.mjs");
+	const result = await installOmp({ project: args.includes("--project") });
+	console.log(`installed: ${result.agent}\ninstalled: ${result.extension} (/docent, 새 omp 세션부터 적용)`);
+	process.exit(0);
+}
 if (args.includes("-h") || args.includes("--help")) {
 	console.log(
 		[
 			"usage: docent [--no-open] [--port N] [--host <ip|tailscale>] [--peer 이름=URL ...]",
+			"       docent start [--port N] [--host ...] [--peer ...]   서버를 백그라운드로 켬. 기록은 ~/.docent/server.log",
+			"       docent stop [--port N]   백그라운드로 켠 서버를 끔",
 			"       docent doctor [--json] [--probe] [--port N]   설치 상태 점검. --probe 는 모델을 한 번 불러 로그인까지 확인",
 			"       docent herdr [--session <id> | --session-file <경로>]   Herdr 창 오른쪽에 도슨트 터미널을 띄움",
+			"       docent install-omp [--project]   omp 서브에이전트 정의와 /docent 명령 설치. 코어나 확장을 고친 뒤에도 다시 실행",
 			"  --host tailscale     이 컴퓨터의 테일스케일 주소에도 열어 다른 컴퓨터의 docent 가 읽어 가게 한다",
 			"  --peer book=http://peer-host.example:4747   그 컴퓨터의 세션을 내 목록에 합친다",
 			"  ~/.docent/config.json  {\"host\":\"tailscale\",\"peers\":{\"book\":\"http://peer-host.example:4747\"}}",
@@ -108,4 +161,4 @@ if (missing) {
 
 process.env.DOCENT_PORT = String(port);
 process.env.DOCENT_ON_LISTEN = openBrowser ? "open" : "";
-await import(resolve(dirname(fileURLToPath(import.meta.url)), "../app/server.mjs"));
+await import("../app/server.mjs");

@@ -92,7 +92,7 @@ npm ls -g videcoder-docent   # 예전 이름 패키지가 남았는지
 - 그대로 두기: 명령 이름이 겹칠 수 있다고 알린다.
 
 **도슨트 서버가 이미 켜져 있고 버전이 다를 때(5단계): "켜져 있는 예전 도슨트를 어떻게 할까요?"**
-- 새 버전으로 다시 켜기 (추천): 사용자가 켜 둔 창에서 끄도록 안내하거나, 사용자가 허락하면 그 프로세스를 끈다.
+- 새 버전으로 다시 켜기 (추천): `docent stop` 뒤 `docent start`. `docent stop`이 0.23.0 이전 서버라 끌 수 없다고 하면 사용자가 켜 둔 창에서 끄도록 안내한다.
 - 그대로 두기: 새 기능 일부가 안 보일 수 있다고 알린다.
 
 ## 4. 설치
@@ -106,25 +106,17 @@ docent --version
 
 - 이미 설치되어 있으면 같은 명령이 최신 버전으로 업데이트한다.
 - 권한 오류(`EACCES`)가 나면 `sudo`를 쓰지 말고, npm 전역 경로가 사용자 폴더를 가리키는지 확인하거나 버전 관리 도구로 설치한 Node를 쓴다.
+- Windows PowerShell에서 `docent --version`이 "이 시스템에서 스크립트를 실행할 수 없으므로"(`UnauthorizedAccess`)로 실패하면 이후 모든 명령에 `.cmd`를 붙여 실행한다(`docent.cmd`, `docent-tui.cmd`). 실행 정책은 바꾸지 않는다.
 
 ## 5. 서버 켜기
 
-먼저 `docent doctor`로 서버가 이미 켜져 있는지 본다. 꺼져 있으면 백그라운드로 켠다. 에이전트의 명령 실행이 막히지 않게 한다.
-
-macOS, Linux:
+먼저 `docent doctor`로 서버가 이미 켜져 있는지 본다. 꺼져 있으면 백그라운드로 켠다. macOS, Linux, Windows 모두 같다.
 
 ```sh
-mkdir -p "${DOCENT_HOME:-$HOME/.docent}"
-nohup docent --no-open > "${DOCENT_HOME:-$HOME/.docent}/server.log" 2>&1 &
+docent start
 ```
 
-Windows PowerShell:
-
-```powershell
-Start-Process -WindowStyle Hidden -FilePath docent -ArgumentList '--no-open'
-```
-
-몇 초 뒤 `docent doctor`에서 서버가 `[ok]`인지 확인한다. 꺼져 있으면 `server.log`의 마지막 줄을 읽고 원인을 쉬운 말로 알린다. 자동 시작 등록은 하지 않는다.
+`docent start`는 서버를 이 명령과 떨어진 프로세스로 켜고 응답할 때까지 기다린다. 에이전트의 명령 실행이 끝나거나 터미널을 닫아도 서버가 남는다. `nohup`이나 `Start-Process`로 따로 띄우지 않는다. 출력은 `~/.docent/server.log`(`DOCENT_HOME`이 있으면 그 폴더)에 쌓이고, 켜지 못하면 그 기록의 마지막 줄을 함께 보여 주므로 원인을 쉬운 말로 알린다. 끄는 명령은 `docent stop`이다. 자동 시작 등록은 하지 않는다.
 
 ## 6. 점검
 
@@ -155,7 +147,7 @@ docent doctor --probe
 | 고른 것 | 할 일 |
 |---|---|
 | 브라우저 | `docent` 실행. 이미 켜진 서버에 브라우저만 연다 |
-| 터미널 | 사용법 안내: 다른 터미널 창에서 `docent-tui`. Herdr 창 안이면 `docent herdr`로 오른쪽 창에 바로 띄울 수 있다고 알린다. 호스트가 omp면 `sh "$(npm root -g)/vibecoder-docent/scripts/install-omp.sh"`로 `/docent` 명령을 설치하고, 새 omp 세션에서 `/docent`를 쓰라고 안내한다 |
+| 터미널 | 사용법 안내: 다른 터미널 창에서 `docent-tui`. Herdr 창 안이면 `docent herdr`로 오른쪽 창에 바로 띄울 수 있다고 알린다. 호스트가 omp면 `docent install-omp`로 서브에이전트 정의와 `/docent` 명령을 설치하고, 새 omp 세션에서 `/docent`를 쓰라고 안내한다. `/docent`는 Herdr 창 안에서만 동작하므로 Herdr를 쓰지 않으면(Windows 포함) `docent-tui`를 쓰라고 알린다 |
 | 휴대폰 | `docent-mobile`로 상태 확인. Tailscale이 없거나 로그인 전이면 그 방법을 안내한다. 준비되면 질문 도구로 **"휴대폰 공유를 지금 켤까요?"** (켜기 (추천) / 나중에)를 묻고, 켜기면 `docent-mobile --enable`. 안내된 HTTPS 주소를 휴대폰에서 열고 홈 화면에 추가하게 한다 |
 | macOS 앱 | 저장소를 내려받아 `npm ci && npm run build:macos`. 서명되지 않은 앱이라 처음 열 때 macOS가 확인을 요구할 수 있다고 알린다 |
 | Jev 설정 방법 보기 | 셸 설정 파일에 `export TYPESAFE_API_KEY=...`를 사용자가 직접 넣고 서버를 다시 켜라고 안내한다 |
@@ -171,7 +163,7 @@ docent doctor --probe
 - 설치한 도슨트 버전과 서버 주소
 - 읽을 수 있는 세션 수 (`docent doctor` 결과)
 - 쓰는 법 세 줄: 세션을 고른다 → 작업 내용 카드를 누른다 → 궁금한 것을 묻는다
-- 컴퓨터를 다시 켠 뒤에는 터미널에서 `docent`를 실행하면 된다는 것
+- 컴퓨터를 다시 켠 뒤에는 터미널에서 `docent start`로 켜고 `docent`로 브라우저를 연다는 것
 
 ## 문제 해결
 
@@ -179,7 +171,8 @@ docent doctor --probe
 |---|---|
 | `docent: command not found` | `npm prefix -g`의 `bin` 폴더가 PATH에 있는지. 셸을 새로 열었는지 |
 | `omp 를 찾을 수 없어요` | `omp --version`. 다른 셸에서 PATH가 다르면 `OMP_BIN`에 omp 실행 파일 경로 지정 |
-| 서버가 바로 꺼짐, `EADDRINUSE` | 포트를 다른 프로그램이 쓰는 중. `docent --no-open --port 4848`로 켜고 `docent doctor --port 4848`로 점검 |
+| 서버가 바로 꺼짐, `EADDRINUSE` | 포트를 다른 프로그램이 쓰는 중. `docent start --port 4848`로 켜고 `docent doctor --port 4848`로 점검 |
 | 세션이 0개 | omp, Claude Code, Codex, Gemini CLI, pi 중 하나로 작업을 한 번 시작한 뒤 다시 확인 |
 | 모델 호출 실패 | `omp`를 실행해 로그인 상태와 기본 모델 확인. 도슨트 설정에서 다른 모델을 고를 수 있음 |
 | 서버 버전이 다르다고 나옴 | 예전 버전 서버가 켜져 있음. 3단계의 해당 질문으로 처리 |
+| Windows PowerShell에서 `docent`가 `UnauthorizedAccess`로 실패 | 스크립트 실행이 막힌 PowerShell. `docent.cmd`처럼 `.cmd`를 붙여 실행 |

@@ -54,7 +54,7 @@ npx github:singandmong/vibecoder-docent    # npm
 bunx github:singandmong/vibecoder-docent   # bun
 ```
 
-Windows에서는 PowerShell이나 명령 프롬프트에서 `docent`를 실행하면 기본 브라우저로 열린다.
+Windows에서는 PowerShell이나 명령 프롬프트에서 `docent`를 실행하면 기본 브라우저로 열린다. PowerShell의 스크립트 실행이 막혀 있으면(`UnauthorizedAccess`) `docent.cmd`, `docent-tui.cmd`처럼 `.cmd`를 붙여 실행한다.
 
 ## 실행
 
@@ -63,6 +63,15 @@ docent
 ```
 
 기본 주소는 `http://127.0.0.1:4747`이다. 이미 켜져 있으면 새 서버를 띄우지 않고 브라우저만 연다. 종료하려면 실행한 터미널에서 중단한다.
+
+터미널을 붙잡아 두지 않으려면 백그라운드로 켠다. 터미널을 닫거나 에이전트의 명령 실행이 끝나도 서버가 남는다. 출력은 `~/.docent/server.log`에 쌓인다.
+
+```sh
+docent start   # 백그라운드로 켜고 응답할 때까지 기다림. 이미 켜져 있으면 그대로 둠
+docent stop    # 백그라운드로 켠 서버를 끔
+```
+
+`docent start`도 아래 옵션(`--port`, `--host`, `--peer`)을 받는다. Windows에 SSH로 접속해 `docent start`를 실행하면 SSH 연결이 끝날 때 서버도 함께 꺼진다(Windows OpenSSH가 세션의 프로세스를 정리한다). 그 컴퓨터의 터미널이나 에이전트에서 켠다.
 
 | 옵션 | 용도 |
 | --- | --- |
@@ -146,7 +155,7 @@ docent-tui --url https://내-컴퓨터.내-사설망.ts.net
 
 Herdr 창에서 실행하면 Herdr의 agents 창에 `docent`로 나타난다. 직접 물은 설명이 진행 중이면 작업 중, 설명 연결이 끊기면 막힘, 끝나면 대기로 바뀌고, 종료하면 목록에서 사라진다. 서버가 미리 설명하는 것은 표시하지 않는다. Herdr 밖에서는 아무것도 알리지 않는다 (ADR 0043).
 
-Herdr 창 안에서는 `docent herdr`로 지금 창 오른쪽에 도슨트를 바로 띄운다. 지금 작업 폴더의 가장 최근 세션이 열리고, 서버가 꺼져 있으면 백그라운드로 켜며, 같은 작업 공간에 도슨트 창이 이미 있으면 그 창으로 이동한다. omp를 쓰면 `sh "$(npm root -g)/vibecoder-docent/scripts/install-omp.sh"`로 `/docent` 명령을 설치해 omp 입력창에서 `/docent`로 지금 omp 세션을 바로 연다. 특정 세션은 `docent-tui --session <세션 id>`로 열 수 있다 (ADR 0044).
+Herdr 창 안에서는 `docent herdr`로 지금 창 오른쪽에 도슨트를 바로 띄운다. 지금 작업 폴더의 가장 최근 세션이 열리고, 서버가 꺼져 있으면 백그라운드로 켜며, 같은 작업 공간에 도슨트 창이 이미 있으면 그 창으로 이동한다. omp를 쓰면 `docent install-omp`로 서브에이전트 정의와 `/docent` 명령을 설치해 omp 입력창에서 `/docent`로 지금 omp 세션을 바로 연다. `/docent`는 Herdr 창 안에서만 동작하고, Herdr 밖(Windows 포함)에서는 다른 터미널 창의 `docent-tui`를 쓴다. 특정 세션은 `docent-tui --session <세션 id>`로 열 수 있다 (ADR 0044).
 
 ## macOS 앱
 

@@ -1,6 +1,6 @@
 // vibecoder-docent: OMP 입력창의 /docent 명령 (ADR 0044).
 // 지금 OMP 세션을 Herdr 오른쪽 창의 도슨트 터미널로 바로 연다. 실제 일은 `docent herdr` 가 한다.
-// scripts/install-omp.sh 가 ~/.omp/agent/extensions/ 에 복사한다. 이 파일을 고치면 다시 설치한다.
+// `docent install-omp` 가 ~/.omp/agent/extensions/ 에 복사한다. 이 파일을 고치면 다시 설치한다.
 // @ts-nocheck
 
 export default function (pi) {

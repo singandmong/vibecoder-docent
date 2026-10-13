@@ -32,7 +32,7 @@ DOCENT_HOME=/tmp/docent-dev DOCENT_PORT=4803 DOCENT_PEERS= npm start
 ## 구조 규칙
 
 - **코어 프롬프트는 `prompt/docent.md` 하나.** 호스트·도구·파일 경로 이름을 쓰지 않는다. 코어가 아는 것은 "과제 지시문에 전사 위치와 질문이 있다"뿐이다.
-- **어댑터는 얇은 껍데기.** `adapters/<host>/`에는 프론트매터와 설치 방법만 두고(예: `adapters/omp/`), 프롬프트 본문을 복사하지 않는다. 코어는 `scripts/install-omp.sh`가 붙여서 설치한다.
+- **어댑터는 얇은 껍데기.** `adapters/<host>/`에는 프론트매터와 설치 방법만 두고(예: `adapters/omp/`), 프롬프트 본문을 복사하지 않는다. 코어는 `docent install-omp`(`app/install-omp.mjs`)가 붙여서 설치한다.
 - **런타임 코드 위치는 `bin/`, `app/`, `scripts/`.** 설명 표시에는 Streamdown·React와 로컬 자산을 쓰고, 정적 자산은 패키지에 넣는다.
 - **도슨트는 설명 전용.** 코드 수정·명령 실행·커밋 경로를 새로 만들지 않는다. 모델 도구 제한도 읽기 전용으로 유지한다.
 - **결정은 `docs/decisions/NNNN-*.md`에 남긴다.** 이미 있는 ADR의 결론을 문서 안에서 조용히 뒤집지 않는다. 뒤집어야 하면 새 ADR을 쓴다.
@@ -59,7 +59,7 @@ DOCENT_HOME=/tmp/docent-dev DOCENT_PORT=4803 DOCENT_PEERS= npm start
 - [ ] 프런트엔드를 고쳤으면 `npm run build` 후 `app/assets/` 변경분 포함
 - [ ] 화면을 고쳤으면 `npm run check:design` 통과 (가능하면 `TYPESAFE_API_KEY`로 Jev 판정까지)
 - [ ] 서버를 띄워 고친 경로를 실제로 한 번 써 봤다(수동 확인 내용을 적는다)
-- [ ] `prompt/docent.md`를 고쳤으면 `scripts/install-omp.sh` 재실행 안내도 함께
+- [ ] `prompt/docent.md`나 `adapters/omp/`를 고쳤으면 `docent install-omp` 재실행 안내도 함께
 - [ ] `CHANGELOG.md`에 한 줄 추가
 - [ ] 결정이 바뀌었으면 `docs/decisions/`에 새 ADR, 아니면 필요 없다고 판단한 이유
 - [ ] 비밀값·개인 경로·실제 전사가 들어가지 않았다

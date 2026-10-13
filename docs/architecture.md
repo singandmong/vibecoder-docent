@@ -3,7 +3,7 @@
 ```
 prompt/docent.md          코어. 호스트 중립 프롬프트. 유일한 진실.
 app/server.mjs            로컬 웹앱 서버. 조립과 HTTP 경로. 세션은 catalog.mjs, 설명 요청은 ask.mjs 에 맡기고 NDJSON 스트림/JSON으로 응답
-app/catalog.mjs           세션 목록 module: 이 컴퓨터의 제공자(호스트 adapter + 정규화 전사 캐시)와 다른 컴퓨터의 제공자를 같은 interface 로, 세션 id → 제공자(모르면 400), 합친 목록(최근 활동 순 200개, 꾸미기는 세션의 제공자가), 파일 경로 → 세션 id(목록과 같은 depth·match 규칙) (ADR 0056)
+app/catalog.mjs           세션 목록 module: 이 컴퓨터의 제공자(호스트 adapter + 정규화 전사 캐시)와 다른 컴퓨터의 제공자를 같은 interface 로, 세션 id → 제공자(모르면 400), 합친 목록(최근 활동 순 200개, 꾸미기는 세션의 제공자가), 파일 경로 → 세션 id(목록과 같은 depth·match 규칙). 세션 id 의 경로 부분은 운영체제와 관계없이 `/` (ADR 0056·0057)
 app/ask.mjs               설명 요청 module: 작업 열기·합류·재생, 사용자 질문 우선 게이트, 같은 스레드 순서 실행, 설명 → 근거 → 저장 → 뒤에서 학습 분류. runner 를 받아 쓴다 (ADR 0050)
 app/runner.mjs            omp 실행 정책 한곳: 사용자 전역 설정 격리, 한 번 호출(-p)과 RPC 대화, 중단·바로잡기 (ADR 0028)
 app/depth.mjs             설명 깊이 module: 고른 깊이 > 분야 판정(분야별 설정이 있을 때만) > 기본값, 판정 실패 규칙, thinking 표. 터미널 상태줄도 같은 표를 씀 (ADR 0028·0040·0051)
@@ -37,7 +37,9 @@ app/terminal-status.mjs   터미널 상태줄 규칙 표와 그리기, 좁은 �
 app/terminal-markdown.mjs Pi Markdown 렌더러 연결과 제어 문자 차단 (ADR 0038)
 app/terminal-theme.mjs    OMP titanium 역할별 색 (ADR 0038)
 app/terminal-herdr.mjs    Herdr 안에서 agents 창에 도슨트 상태(대기, 작업 중, 막힘)와 재시작 명령을 알림 (ADR 0043)
-app/herdr-launch.mjs      `docent herdr`: Herdr 창을 나눠 도슨트 터미널을 띄우고 세션을 고름, 이미 있으면 이동 (ADR 0044)
+app/herdr-launch.mjs      `docent herdr`: Herdr 창을 나눠 도슨트 터미널을 띄우고 세션을 고름, 이미 있으면 이동. 꺼진 서버는 server-process.mjs 로 켬 (ADR 0044)
+app/server-process.mjs    `docent start`, `docent stop`: 명령과 떨어진 프로세스로 서버를 켜고(출력은 DOCENT_HOME/server.log) /api/health 의 pid 로 끔 (ADR 0057)
+app/install-omp.mjs       `docent install-omp`: 프론트매터 + 코어를 결합해 omp 서브에이전트 정의로, `/docent` 확장 복사. 셸 없이 모든 OS 에서 같은 명령 (ADR 0057)
 adapters/omp/docent-command.ts  OMP `/docent` 슬래시 명령. `docent herdr`를 부르는 얇은 확장 (ADR 0044)
 app/doctor.mjs            `docent doctor`: Node, omp와 모델, 서버와 세션 수, 선택적 모델 호출 점검 (ADR 0041)
 INSTALL-AGENT.md          링크 하나로 에이전트가 따라 하는 설치 안내 (ADR 0041)
@@ -49,7 +51,6 @@ scripts/transcript-gemini.mjs Gemini CLI 채팅 기록 adapter(갱신 연산 접
 scripts/transcript-pi.mjs     pi 세션 adapter: 줄을 읽을 때 한 번 omp 모양으로 바꿔 omp adapter 를 씀 (모듈 + CLI, ADR 0032·0054)
 scripts/transcript-jsonl.mjs  adapter 공용: jsonl 줄 읽기(잘린 줄 건너뜀), 전사 머리말 쓰기와 작업 폴더 읽기(모르면 null), CLI (ADR 0054)
 scripts/transcript-source.mjs 메시지·내용 버전 기반 소스 표시, 코드와 서브에이전트 원문 보존
-scripts/install-omp.sh    프론트매터 + 코어를 결합해 omp 에이전트 파일로 설치
 docs/                     개념·범위·결정
 ```
 
@@ -70,7 +71,7 @@ docs/                     개념·범위·결정
 - 모바일은 기존 웹 화면을 600px 이하 단일 화면 탐색으로 표시한다. 서비스 워커는 `/offline.html`만 저장하고 `/api/` 응답은 `no-store`다. HTTPS는 사용자가 명시적으로 설정한 Tailscale Serve를 사용하며 공개 Funnel은 금지한다.
 - 터미널은 HTTP와 SSE, NDJSON을 읽는 Node 클라이언트다. 서버는 별도로 실행한다. `terminal-ui.mjs`는 Pi 대화형 모드의 배치(제목과 단축키, 대화, 진행 표시, 가로선 사이 입력창, 두 줄 상태줄)를 그린다. 입력창이 `/`, `@`, `#`, `$` 중 하나로 시작하면 입력창 아래에 명령, 세션, 대화, 설정 목록을 띄우고, 설정은 `PATCH /api/profiles/:id`와 `GET /api/models`로 바꾼다 (ADR 0039). 상태줄은 `terminal-status.mjs`의 규칙 표(`docs/terminal-status-line.md`)로 그리며, 즐겨찾기 수는 `GET /api/favorites`, 학습 시간과 문답 수는 문답 기록, 추론 수준은 `depth.mjs`의 `THINKING`에서 계산한다 (ADR 0040). Ctrl+T로 대화, Ctrl+O로 현재 대화의 답을 고르는 단축키도 남아 있다. 초안과 커서는 프로필, 세션, 스레드, 질문/바로잡기별로 메모리에 보관한다. 답 선택은 읽는 위치만 바꾸며 요청이나 스레드를 만들지 않는다. `terminal-markdown.mjs`는 `@earendil-works/pi-tui`의 Markdown 렌더러로 설명과 원문을 그리며, 렌더링 전에 제어 문자를 제거하고 색 코드 외의 터미널 제어를 내보내지 않는다. `terminal-theme.mjs`의 역할별 색상은 OMP `titanium-prompt-focus` 값이며 본문은 터미널 기본 색을 상속하고 NO_COLOR를 존중한다. 터미널 종료는 서버를 끄지 않는다 (ADR 0038).
 - macOS 앱은 격리된 Electron 창에서 기존 웹 화면을 연다. `/api/health`의 제품 식별자를 확인해 로컬 서버를 재사용하거나 자식 서버를 시작한다. 앱이 소유한 서버만 종료한다.
-- `GET /api/health`는 `{app: "vibecoder-docent", version}`을 반환한다. 서버 확인용이지 사용자 인증 수단이 아니다.
+- `GET /api/health`는 `{app: "vibecoder-docent", version, pid}`를 반환한다. 서버 확인용이지 사용자 인증 수단이 아니다. `docent stop`은 이 pid 로 이 컴퓨터에서 신호를 보내며, HTTP로 서버를 끄는 경로는 없다 (ADR 0057).
 
 
 ## 코어가 가정하는 것
@@ -136,4 +137,4 @@ Streamdown·React는 Markdown 표시를 담당하며 나머지 페이지 상태�
 
 ## 코어를 고칠 때
 
-`prompt/docent.md` 만 고친다. 웹앱은 매 요청 파일을 읽으므로 재시작 불필요. 서브에이전트 경로는 `scripts/install-omp.sh` 재실행.
+`prompt/docent.md` 만 고친다. 웹앱은 매 요청 파일을 읽으므로 재시작 불필요. 서브에이전트 경로는 `docent install-omp` 재실행.

@@ -1,12 +1,10 @@
 // `docent herdr`: 지금 Herdr 창 오른쪽에 도슨트 터미널을 띄운다 (ADR 0044). OMP `/docent` 도 이 명령을 부른다.
-import { execFile, spawn } from "node:child_process";
-import { mkdirSync, openSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { startServer } from "./server-process.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const DOCENT_BIN = resolve(here, "../bin/docent.mjs");
 const TUI_BIN = resolve(here, "../bin/docent-tui.mjs");
 
 const herdr = (bin, args) => new Promise((resolveRun, reject) => {
@@ -17,21 +15,6 @@ const herdr = (bin, args) => new Promise((resolveRun, reject) => {
 export const shellWord = (value) => `'${String(value).replaceAll("'", `'\\''`)}'`;
 
 const getJson = (url, ms = 3000) => fetch(url, { signal: AbortSignal.timeout(ms) }).then((response) => (response.ok ? response.json() : null)).catch(() => null);
-
-async function ensureServer(base, env, port) {
-	if ((await getJson(`${base}/api/health`))?.app === "vibecoder-docent") return false;
-	if (Array.isArray(await getJson(`${base}/api/sessions`, 15_000))) return false;
-	const home = env.DOCENT_HOME || join(homedir(), ".docent");
-	mkdirSync(home, { recursive: true });
-	const log = openSync(join(home, "server.log"), "a");
-	const child = spawn(process.execPath, [DOCENT_BIN, "--no-open", "--port", String(port)], { detached: true, stdio: ["ignore", log, log], env });
-	child.unref();
-	for (let i = 0; i < 30; i++) {
-		await new Promise((r) => setTimeout(r, 500));
-		if ((await getJson(`${base}/api/health`))?.app === "vibecoder-docent") return true;
-	}
-	throw new Error(`도슨트 서버를 켜지 못했어요. ${join(home, "server.log")} 를 확인하세요.`);
-}
 
 /** 세션 파일 경로 > 명시한 id > 이 폴더의 가장 최근 세션 순으로 고른다. 못 고르면 null (목록에서 고른다). */
 async function pickSession(base, { session, sessionFile, cwd }) {
@@ -53,7 +36,7 @@ export async function launchInHerdr({ env = process.env, cwd = process.cwd(), po
 	const bin = env.HERDR_BIN_PATH;
 	if (env.HERDR_ENV !== "1" || !pane || !bin) throw Object.assign(new Error("Herdr 창 안에서 실행하세요. Herdr 밖에서는 다른 터미널에서 docent-tui 를 실행하면 돼요."), { code: "NOT_HERDR" });
 	const base = `http://127.0.0.1:${port}`;
-	const startedServer = await ensureServer(base, env, port);
+	const { started: startedServer } = await startServer({ port, env });
 	const target = await pickSession(base, { session, sessionFile, cwd });
 
 	// 같은 작업 공간에 이미 도슨트가 있으면 새로 만들지 않고 그 창으로 간다.
