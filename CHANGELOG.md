@@ -2,6 +2,25 @@
 
 형식: [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/). 버전은 [SemVer](https://semver.org/lang/ko/). 0.x 동안은 minor 가 새 기능, patch 가 고침.
 
+## [0.23.0] — 2026-10-14
+
+### 추가
+- `docent start`: 서버를 백그라운드로 켜고 응답할 때까지 기다림. 터미널을 닫거나 에이전트의 명령 실행이 끝나도 서버가 남음. 출력은 `~/.docent/server.log`. 이미 켜져 있으면 그대로 둠. `docent stop`: 그 서버를 끔. `/api/health`가 `pid`를 함께 돌려줌 (ADR 0057).
+- `docent install-omp [--project]`: omp 서브에이전트 정의와 `/docent` 명령을 설치. 셸 없이 macOS, Linux, Windows PowerShell에서 같은 명령 (ADR 0057).
+
+### 고침
+- Windows에서 `docent`가 서버를 켜지 못하고 `ERR_UNSUPPORTED_ESM_URL_SCHEME`(`Received protocol 'c:'`)로 끝나던 문제 (ADR 0057).
+- Windows에서 모든 세션이 `bad session id`로 열리지 않아 작업 내용 카드, 실시간 사건, 질문이 모두 안 되던 문제. 세션 id의 경로 부분을 운영체제와 관계없이 `/`로 씀 (ADR 0057).
+- Windows에서 워크트리 세션의 저장소 이름이 워크트리 폴더 이름으로 보이던 문제.
+- 에이전트 설치 안내(INSTALL-AGENT)를 따라 켠 서버가 사라지던 문제. macOS, Linux의 `nohup … &`는 omp 같은 에이전트가 명령 실행을 끝낼 때 함께 정리되고, Windows의 `Start-Process -FilePath docent`는 `docent.ps1`을 메모장으로 열었음. 이제 모든 운영체제에서 `docent start` (ADR 0057).
+- Codex 앱 세션의 제목과 전사 첫 줄이 `<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>`로 보이던 문제. 발화 앞의 snake_case 감싼 블록을 걷어 냄.
+- 용어 뜻 찾기 목록과 배운 내용 다시보기에 "개" 같은 한 글자 한글 낱말이 용어로 올라오던 문제. 이미 저장된 것도 사전에 올리지 않음.
+
+### 변경
+- `scripts/install-omp.sh`를 지우고 `docent install-omp`로 바꿈. 저장소에서는 `node bin/docent.mjs install-omp` (ADR 0057).
+- README와 INSTALL-AGENT에 Windows PowerShell의 스크립트 실행이 막혀 있을 때 `docent.cmd`처럼 `.cmd`를 붙여 실행하는 방법을 적음.
+- CI에 Windows 작업을 추가함. 가짜 omp, herdr를 shebang 스크립트로 쓰는 시험은 빼고 나머지와 `docent start`/`stop` 시험을 돌림 (ADR 0057).
+
 ## [0.22.0] — 2026-10-12
 
 ### 고침
