@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { unified } from "unified";
+import remarkParse from "remark-parse";
+import { docentRemarkPlugins } from "../app/markdown-remark.mjs";
 import { createTerminalMarkdown, cjkFriendlyEmphasis } from "../app/terminal-markdown.mjs";
 import { createTerminalTheme } from "../app/terminal-theme.mjs";
 import { terminalSafeText } from "../app/terminal-input.mjs";
@@ -254,4 +257,85 @@ test("terminal markdown CJK emphasis fix leaves ASCII, code spans, and fences un
 	assert.ok(block.plainText.includes("**안녕.**하세요"));
 	// 이미 규칙대로 강조되는 문장은 바꾸지 않는다.
 	assert.equal(cjkFriendlyEmphasis("**굵게**와 `코드` 그리고 **둘째**를"), "**굵게**와 `코드` 그리고 **둘째**를");
+});
+
+// ADR 0065: 터미널은 웹과 같은 파서(remark + @streamdown/cjk)로 강조 구간을 정한다. 아래 문장들에서 두 렌더러가 같은 글자를 같은 모양으로 칠하는지 비교한다.
+function webEmphasis(markdown) {
+	const processor = unified().use(remarkParse);
+	for (const plugin of docentRemarkPlugins()) processor.use(...(Array.isArray(plugin) ? plugin : [plugin]));
+	const tree = processor.runSync(processor.parse(markdown));
+	const style = { strong: "bold", emphasis: "italic", delete: "strike" };
+	const text = (node) => (node.value ?? "") + (node.children ?? []).map(text).join("");
+	const found = { bold: "", italic: "", strike: "" };
+	const visit = (node, inside) => {
+		const kind = style[node.type];
+		if (kind && !inside.has(kind)) found[kind] += text(node);
+		const next = kind ? new Set([...inside, kind]) : inside;
+		for (const child of node.children ?? []) visit(child, next);
+	};
+	visit(tree, new Set());
+	return found;
+}
+
+function terminalEmphasis(markdown) {
+	const rows = createTerminalMarkdown(createTerminalTheme(COLOR_ENV)).render(markdown, 400);
+	const codes = { 1: ["bold", true], 22: ["bold", false], 3: ["italic", true], 23: ["italic", false], 9: ["strike", true], 29: ["strike", false] };
+	const state = { bold: false, italic: false, strike: false };
+	const found = { bold: "", italic: "", strike: "" };
+	for (const row of rows) {
+		for (const part of row.split(/(\u001b\[[0-9;]*m)/u)) {
+			const sgr = /^\u001b\[([0-9;]*)m$/u.exec(part);
+			if (sgr) {
+				for (const code of sgr[1].split(";")) if (codes[code]) state[codes[code][0]] = codes[code][1];
+			} else {
+				for (const kind of Object.keys(state)) if (state[kind]) found[kind] += part;
+			}
+		}
+	}
+	return found;
+}
+
+const squash = (found) => Object.fromEntries(Object.entries(found).map(([kind, value]) => [kind, value.replace(/\s+/gu, "")]));
+
+const DIFFERENTIAL_CASES = [
+	"**`안녕하세요`**를 확인하세요",
+	"**\"문장\"**을 읽습니다",
+	"한글**\"문장\"**을 읽습니다",
+	"***\"굵게 기울임\"***을 봅니다",
+	"**\"a\"** 및 *\"b\"*를 봅니다",
+	"~~\"취소\"~~는 취소선입니다",
+	"*\"기울임\"*을 읽고 **(괄호)**는 따로 둡니다",
+	"앞 **`a`**와 뒤 **`b`**를 둘 다",
+	"**「인용」**이라고 하고 *『제목』*이라고 한다",
+	"***`코드`***를 보세요",
+	"a**b**c 와 *d* 는 ASCII 입니다",
+	"**굵게**와 `코드` 그리고 **둘째**를",
+	"**안녕.**하세요 그리고 **끝!**입니다",
+	"2 * 3 * 4 는 곱셈이고 **\"굵게\"**를 씁니다",
+	"`**안녕.**하세요` 와 \\*\\*안녕.\\*\\*하세요",
+	"**`a`**를 먼저 쓰고\n둘째 줄에 *\"b\"*를 씁니다",
+	"여러 줄 코드 `a\nb **` 뒤에 **\"굵게\"**를 씁니다",
+	"여러 줄 코드 `a **\nb` 와 **\"굵게\"**를 그리고 ~~\"끝\"~~은",
+	"- **\"목록\"**을 읽고\n- *\"둘째\"*를 읽는다",
+];
+
+test("terminal emphasis matches the web remark pipeline node-for-node (ADR 0065)", () => {
+	for (const source of DIFFERENTIAL_CASES) {
+		assert.deepEqual(squash(terminalEmphasis(source)), squash(webEmphasis(source)), source);
+	}
+});
+
+test("terminal emphasis pass handles *** mixes, multi-line code spans, and strikethrough", () => {
+	const star3 = terminalEmphasis("***\"굵게 기울임\"***을 봅니다");
+	assert.equal(star3.bold, "\"굵게 기울임\"");
+	assert.equal(star3.italic, "\"굵게 기울임\"");
+	const mix = terminalEmphasis("**\"a\"** 및 *\"b\"*를");
+	assert.equal(mix.bold, "\"a\"");
+	assert.equal(mix.italic, "\"b\"");
+	assert.equal(terminalEmphasis("~~\"취소\"~~는").strike, "\"취소\"");
+	const spanning = "코드 `a\nb **` 뒤 **\"굵게\"**를";
+	assert.equal(terminalEmphasis(spanning).bold, "\"굵게\"");
+	assert.equal(cjkFriendlyEmphasis("`a\nb **`"), "`a\nb **`");
+	assert.equal(cjkFriendlyEmphasis("***\"x\"***을"), "***\"x\"***\ufeff을");
+	assert.equal(cjkFriendlyEmphasis("a**b**c ASCII *d*"), "a**b**c ASCII *d*");
 });

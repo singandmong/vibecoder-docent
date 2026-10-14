@@ -4,7 +4,7 @@
 // herdr 가 없거나, 실패하거나, 오래 걸리면 정보 없음으로 둔다. 세션 목록은 그대로 나가야 한다.
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 export const HERDR_CACHE_MS = 3000;
 export const HERDR_TIMEOUT_MS = 1500;
@@ -42,7 +42,12 @@ const paneNumber = (pane) => {
 	return match ? Number(match[1]) : Number.NaN;
 };
 
-/** 두 명령의 JSON 을 세션 파일 경로 → `{ workspace, label, number, pane }` 로. 모양이 다른 항목은 건너뛴다. */
+const ID_PREFIX = "id:";
+
+/**
+ * 두 명령의 JSON 을 `{ workspace, label, number, pane }` 표로. 열쇠는 세션 파일 절대 경로이고, 에이전트가 경로 없이
+ * 세션 id 만 알린 창(`agent_session.kind: "id"`)은 `id:<값>` 이다(ADR 0064). 모양이 다른 항목은 건너뛴다.
+ */
 export function mapSessions(agentsJson, workspacesJson) {
 	const workspaces = new Map();
 	for (const w of workspacesJson?.result?.workspaces ?? []) {
@@ -51,14 +56,16 @@ export function mapSessions(agentsJson, workspacesJson) {
 	const found = new Map();
 	for (const agent of agentsJson?.result?.agents ?? []) {
 		const session = agent?.agent_session;
-		if (session?.kind !== "path" || typeof session.value !== "string" || !session.value) continue;
+		if (!["path", "id"].includes(session?.kind) || typeof session.value !== "string" || !session.value.trim()) continue;
 		const pane = typeof agent.pane_id === "string" ? agent.pane_id : "";
 		const workspace = pane.includes(":") ? pane.slice(0, pane.indexOf(":")) : agent.workspace_id;
 		const meta = workspaces.get(workspace);
 		if (!meta) continue;
 		const label = typeof meta.label === "string" ? meta.label.trim() : "";
 		const entry = { workspace, label: label || `작업 공간 ${meta.number}`, number: meta.number, pane };
-		const key = resolve(session.value);
+		// 짧은 id 는 여러 파일 이름 끝과 우연히 맞을 수 있어 받지 않는다.
+		if (session.kind === "id" && session.value.trim().length < 8) continue;
+		const key = session.kind === "path" ? resolve(session.value) : `${ID_PREFIX}${session.value.trim()}`;
 		const same = found.get(key);
 		// 같은 세션이 두 창에 열려 있으면 사이드바에서 더 앞의 창을 보인다.
 		if (!same || entry.number < same.number || (entry.number === same.number && paneNumber(entry.pane) < paneNumber(same.pane))) found.set(key, entry);
@@ -67,7 +74,23 @@ export function mapSessions(agentsJson, workspacesJson) {
 }
 
 /**
- * `sessions()` → Promise<Map<세션 파일 절대 경로, {workspace, label, number, pane}>>. 실패하면 빈 Map.
+ * 세션 파일 하나의 Herdr 자리. 경로가 먼저이고, 없으면 파일 이름이 그 id 이거나 `-<id>`, `_<id>` 로 끝나는 id 항목이다.
+ * Claude 는 `<id>.jsonl`, Codex 는 `rollout-<시각>-<id>.jsonl`, omp 는 `<시각>_<id>.jsonl` 이다.
+ */
+export function herdrEntryFor(open, path) {
+	const byPath = open.get(resolve(path));
+	if (byPath) return byPath;
+	const stem = basename(path).replace(/\.jsonl?$/i, "");
+	for (const [key, entry] of open) {
+		if (!key.startsWith(ID_PREFIX)) continue;
+		const id = key.slice(ID_PREFIX.length);
+		if (stem === id || stem.endsWith(`-${id}`) || stem.endsWith(`_${id}`)) return entry;
+	}
+	return null;
+}
+
+/**
+ * `sessions()` → Promise<Map<세션 파일 절대 경로 또는 `id:<세션 id>`, {workspace, label, number, pane}>>. 실패하면 빈 Map. 찾기는 `herdrEntryFor`.
  * 결과(실패 포함)는 `ttlMs` 동안 기억하고, 그 사이 동시에 부른 쪽은 같은 조회를 기다린다.
  * `exec(args)` 는 herdr 의 표준 출력 문자열, `now()` 는 밀리초: 시험이 가짜를 넘긴다.
  */

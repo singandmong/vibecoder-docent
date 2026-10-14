@@ -4,8 +4,8 @@
 const LIST_TIMEOUT_MS = 5000;
 const FETCH_TIMEOUT_MS = 30_000;
 
-/** `fetch` 는 HTTP 연결 자리다. 시험은 메모리 안의 가짜를 넘긴다. */
-export function peerProvider(name, base, { fetch = globalThis.fetch } = {}) {
+/** `fetch` 는 HTTP 연결 자리, `ssh(name, base)` 는 그 컴퓨터에 닿는 이 컴퓨터의 ssh 별칭을 찾는 자리다(ssh-aliases.mjs, ADR 0067). 시험은 메모리 안의 가짜를 넘긴다. */
+export function peerProvider(name, base, { fetch = globalThis.fetch, ssh = null } = {}) {
 	const prefix = `@${name}/`;
 	const url = (path, sid) => `${base.replace(/\/$/, "")}${path}?id=${encodeURIComponent(sid.slice(prefix.length))}`;
 	const get = async (u, ms) => {
@@ -21,8 +21,11 @@ export function peerProvider(name, base, { fetch = globalThis.fetch } = {}) {
 		check() {},
 		async list() {
 			try {
+				const found = ssh ? Promise.resolve(ssh(name, base)).catch(() => null) : null;
 				const r = await get(`${base.replace(/\/$/, "")}/api/sessions`, LIST_TIMEOUT_MS);
-				return (await r.json()).filter((s) => !s.host).map((s) => ({ ...s, id: prefix + s.id, host: name }));
+				const alias = found && (await found);
+				// 별칭은 이 컴퓨터의 ssh 설정에서 온다. 그쪽 서버가 보낸 ssh 값은 믿지 않고 버린다.
+				return (await r.json()).filter((s) => !s.host).map(({ ssh: _remote, ...s }) => ({ ...s, id: prefix + s.id, host: name, ...(alias ? { ssh: alias } : {}) }));
 			} catch (e) {
 				console.error(`docent: ${name} 세션 목록을 못 받았어요 (${e.message})`);
 				return [];

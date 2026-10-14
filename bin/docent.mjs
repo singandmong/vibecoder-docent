@@ -52,6 +52,7 @@ if (args[0] === "start" || args[0] === "stop") {
 			console.log(result.started
 				? `docent: 백그라운드로 켰어요 → ${result.url}\n  기록: ${result.log}\n  끄기: docent stop`
 				: `docent: 이미 켜져 있어요 → ${result.url}`);
+			if (result.fallback) console.warn(`docent: Windows 관리 도구(WMI)로 켜지 못해 일반 방식으로 켰어요. 이 창이나 SSH 연결을 닫으면 서버도 꺼질 수 있어요.\n  까닭: ${result.fallback}`);
 			process.exit(0);
 		}
 		const result = await stopServer({ port });

@@ -14,7 +14,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { httpError } from "./errors.mjs";
 import { watchSession } from "./live.mjs";
-import { compareSessions } from "./herdr-workspaces.mjs";
+import { compareSessions, herdrEntryFor } from "./herdr-workspaces.mjs";
 import { gitLocationOf, headOf } from "./repo.mjs";
 import { recentLine } from "./session-recent.mjs";
 import { pickFromTail, readHead } from "./session-file.mjs";
@@ -105,6 +105,7 @@ function localProvider(adapter, { home, transcripts, placeOf, herdr }) {
 				}
 				if (!m) continue;
 				const rel = relOf(path);
+				const place = herdrEntryFor(open, path);
 				out.push({
 					id: `${id}:${rel}`,
 					provider: id,
@@ -117,7 +118,7 @@ function localProvider(adapter, { home, transcripts, placeOf, herdr }) {
 					bytes: st.size,
 					first: m.first ?? null,
 					host: null,
-					...(open.has(resolve(path)) ? { herdr: open.get(resolve(path)) } : {}),
+					...(place ? { herdr: place } : {}),
 				});
 			}
 			return out;

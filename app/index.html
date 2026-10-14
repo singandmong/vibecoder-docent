@@ -1229,6 +1229,8 @@ async function loadSessions() {
     const entries = await server.json("/api/sessions");
     if (request !== sessionsRequest) return;
     sessions = entries.map((s) => ({ ...s, title: webTitle(s.title) })); renderSideTabs(); renderSessions();
+    const fresh = current && sessions.find((s) => s.id === current.id);
+    if (fresh) renderSessionInfo(fresh, { keepOpen: true });
     refreshedAt = new Date().toISOString(); refreshFailed = false;
   } catch { if (request === sessionsRequest) refreshFailed = true; }
   renderRefreshed();
@@ -1288,6 +1290,27 @@ function renderSessions() {
   if (!matches.length) box.append(el("p", "side-empty", query ? "찾는 세션이 없어요." : "아직 세션이 없어요."));
 }
 
+/** 세션 정보 팝업. 목록을 다시 받을 때마다 새 값(Herdr 작업 공간 이름 등)으로 다시 그린다. 그때 열려 있었으면 연 채로 둔다. */
+function renderSessionInfo(s, { keepOpen = false } = {}) {
+  const key = JSON.stringify([s.id, s.cwd, s.repo, s.host, s.ssh, s.herdr, s.started, s.updated, s.first]);
+  const shown = $("#sessionInfo details");
+  if (keepOpen && shown?.dataset.key === key) return;
+  const info = el("details", "session-info");
+  info.dataset.key = key;
+  info.open = keepOpen && Boolean(shown?.open);
+  const infoSummary = el("summary");
+  infoSummary.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><circle cx="12" cy="7.5" r=".6" fill="currentColor"/></svg>';
+  infoSummary.append("세션 정보"); info.append(infoSummary);
+  const fields = el("dl");
+  const date = (value) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString("ko-KR") : "확인되지 않음";
+  for (const [label, value] of [["작업 폴더", s.cwd], ["레포지토리", s.repo], ["기기", s.host || "로컬"], ["SSH 접속", s.ssh && `ssh ${s.ssh}`], ["Herdr 작업 공간", s.herdr && (s.herdr.label || `작업 공간 ${s.herdr.number}`)], ["시작", date(s.started)], ["최근 활동", date(s.updated)], ["첫 요청", s.first]]) {
+    if (value) fields.append(el("dt", null, label), el("dd", null, value));
+  }
+  const pop = el("div", "session-pop"), link = el("a", null, "기록 원문 열기");
+  link.href = `/api/transcript?id=${encodeURIComponent(s.id)}`; link.target = "_blank"; link.rel = "noopener";
+  pop.append(fields, link); info.append(pop); $("#sessionInfo").replaceChildren(info);
+}
+
 async function select(s) {
   if (!profilesReady) return;
   showChat(); invalidateContext(); current = s; historyLoading = true;
@@ -1295,18 +1318,7 @@ async function select(s) {
   const c = capture(); remember("session", s.id); renderSessions();
   $("#title").textContent = s.title; $("#title").title = s.title;
   $("#sub").textContent = `${s.project}, ${s.provider}${s.host ? `, ${s.host}` : ""}`;
-  const info = el("details", "session-info");
-  const infoSummary = el("summary");
-  infoSummary.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><circle cx="12" cy="7.5" r=".6" fill="currentColor"/></svg>';
-  infoSummary.append("세션 정보"); info.append(infoSummary);
-  const fields = el("dl");
-  const date = (value) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString("ko-KR") : "확인되지 않음";
-  for (const [label, value] of [["작업 폴더", s.cwd], ["레포지토리", s.repo], ["기기", s.host || "로컬"], ["Herdr 작업 공간", s.herdr && (s.herdr.label || `작업 공간 ${s.herdr.number}`)], ["시작", date(s.started)], ["최근 활동", date(s.updated)], ["첫 요청", s.first]]) {
-    if (value) fields.append(el("dt", null, label), el("dd", null, value));
-  }
-  const pop = el("div", "session-pop"), link = el("a", null, "기록 원문 열기");
-  link.href = `/api/transcript?id=${encodeURIComponent(s.id)}`; link.target = "_blank"; link.rel = "noopener";
-  pop.append(fields, link); info.append(pop); $("#sessionInfo").replaceChildren(info);
+  renderSessionInfo(s);
   const log = $("#log"), flow = $("#flow"); clearSurface(log); clearSurface(flow);
   flow.append(el("p", "empty flow-empty", "AI의 질문, 결과, 계획이 도착하면 여기에 쌓여요."));
   $("#liveNotice").textContent = ""; state.status = ""; setStage(); syncComposer();

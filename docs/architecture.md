@@ -4,7 +4,7 @@
 prompt/docent.md          코어. 호스트 중립 프롬프트. 유일한 진실.
 app/server.mjs            로컬 웹앱 서버. 조립과 HTTP 경로. 세션은 catalog.mjs, 설명 요청은 ask.mjs 에 맡기고 NDJSON 스트림/JSON으로 응답
 app/catalog.mjs           세션 목록 module: 이 컴퓨터의 제공자(호스트 adapter + 정규화 전사 캐시)와 다른 컴퓨터의 제공자를 같은 interface 로, 세션 id → 제공자(모르면 400), 합친 목록(Herdr 에 열린 세션 먼저, 그다음 최근 활동 순 200개, 꾸미기는 세션의 제공자가), 파일 경로 → 세션 id(목록과 같은 depth·match 규칙). 세션 id 의 경로 부분은 운영체제와 관계없이 `/` (ADR 0056·0057·0060)
-app/herdr-workspaces.mjs  Herdr 작업 공간: `herdr agent list`, `herdr workspace list` 를 3초 캐시로 읽어 세션 파일 경로 → {workspace, label, number, pane}. PATH 의 herdr, 없으면 ~/.local/bin/herdr, 1.5초 제한, 실패하면 정보 없음. 목록 정렬 비교(compareSessions) 포함 (ADR 0060)
+app/herdr-workspaces.mjs  Herdr 작업 공간: `herdr agent list`, `herdr workspace list` 를 3초 캐시로 읽어 세션 파일 경로(또는 경로 없이 알린 세션 id) → {workspace, label, number, pane}. 파일 자리 찾기는 herdrEntryFor. PATH 의 herdr, 없으면 ~/.local/bin/herdr, 1.5초 제한, 실패하면 정보 없음. 목록 정렬 비교(compareSessions) 포함 (ADR 0060·0064)
 app/ask.mjs               설명 요청 module: 작업 열기·합류·재생, 사용자 질문 우선 게이트, 같은 스레드 순서 실행, 설명 → 근거 → 저장 → 뒤에서 학습 분류. runner 를 받아 쓴다 (ADR 0050)
 app/runner.mjs            omp 실행 정책 한곳: 사용자 전역 설정 격리, 한 번 호출(-p)과 RPC 대화, 중단·바로잡기 (ADR 0028)
 app/omp-bin.mjs           OMP_BIN → 실행할 명령. `.js`·`.mjs`·`.cjs` 진입점은 지금 Node 로 실행(Windows 는 shebang 을 못 읽음). runner·models·doctor·시작 확인이 모두 거침 (ADR 0062)
@@ -27,7 +27,8 @@ app/evidence.mjs          소스 검증·근거 추출·원문 위치와 주변 
 app/review.mjs            답 속 용어 링크용 용어집: 저장된 핵심 단어 + `용어(풀이)` 규칙 추출
 app/wiki.mjs              배운 내용 다시보기 용어 사전: 핵심 단어 검증·집계·옛 문답 일괄 추출 (ADR 0020)
 app/trim.mjs              긴 전사 줄이기: 120,000자 넘으면 앞 턴은 사용자 발화만, 최근 턴은 그대로 (ADR 0009)
-app/peers.mjs             다른 컴퓨터의 제공자: 원격 세션 목록·전사·라이브, 문답은 가져오지 않음. interface 는 catalog.mjs (ADR 0011·0014·0056)
+app/peers.mjs             다른 컴퓨터의 제공자: 원격 세션 목록·전사·라이브, 문답은 가져오지 않음. 목록 항목에 이 컴퓨터의 ssh 별칭(`ssh`)을 붙이고 그쪽이 보낸 값은 버림. interface 는 catalog.mjs (ADR 0011·0014·0056·0067)
+app/ssh-aliases.mjs       `~/.ssh/config` 의 Host 별칭(Include 포함)을 `ssh -G` 로 풀어 peer URL 과 같은 컴퓨터의 별칭을 고름. 10분 캐시, 목록은 최대 1초만 기다림 (ADR 0067)
 app/dialogue.mjs          질문 대상 검증, 사건 카드의 질문 대상·스레드·미리 설명 요청문, 분류용 최근 대화 (ADR 0022·0028)
 app/slots.mjs             답 → {status, headline, explain, details[]}, Markdown 블록 보존 (ADR 0017)
 app/index.html            세션·작업 내용·카드별 대화·즐겨찾기·설정·배운 내용 다시보기·PiP. Streamdown 로컬 자산으로 Markdown 표시. 대화 목록과 스레드 소속은 /conversations.mjs, 서버와 주고받기는 /transport.mjs, 설명 요청 상태는 /session-client.mjs (ADR 0015·0017·0053·0055)
@@ -36,12 +37,12 @@ app/mobile.mjs           PWA 설치, 연결 안내, 모바일 표시 상태
 app/sw.js                개인 기록 없는 오프라인 안내만 캐시
 app/terminal-ui.mjs       터미널 클라이언트 화면: 대화, 입력창(자리별 초안), 대기 질문, 기호 메뉴, 선택 목록. 대화 목록과 스레드 소속은 conversations.mjs, 설명 요청 상태는 session-client.mjs (ADR 0038·0039·0053·0055)
 app/terminal-status.mjs   터미널 상태줄 규칙 표와 그리기, 좁은 화면 항목 빼기 (ADR 0040)
-app/terminal-markdown.mjs Pi Markdown 렌더러 연결과 제어 문자 차단. 한글 옆 `**` 강조는 `cjkFriendlyEmphasis` 전처리로 굵게 (ADR 0038·0061)
+app/terminal-markdown.mjs Pi Markdown 렌더러 연결과 제어 문자 차단. 한글 옆 강조는 `app/assets/terminal-cjk.js`(웹과 같은 remark + `@streamdown/cjk` 파서를 `app/terminal-cjk-src.mjs` 에서 미리 묶은 것)가 강조 구간을 찾아 CommonMark 가 거절할 구분 기호 바깥에 U+FEFF 를 끼우고 렌더 뒤 지움 (ADR 0038·0061·0065)
 app/markdown-remark.mjs   웹 Markdown 의 remark 플러그인 순서. `@streamdown/cjk` 로 한글 옆 강조와 취소선을 풂. 빌드 입력이라 배포 패키지에서 빠짐 (ADR 0061)
 app/terminal-theme.mjs    OMP titanium 역할별 색 (ADR 0038)
 app/terminal-herdr.mjs    Herdr 안에서 agents 창에 도슨트 상태(대기, 작업 중, 막힘)와 재시작 명령을 알림 (ADR 0043)
 app/herdr-launch.mjs      `docent herdr`: 터미널(TTY)이면 그 창에서 도슨트 터미널을 바로 실행, `--split` 이거나 TTY 가 아니면 Herdr 창을 나눠 띄우고 이미 있으면 이동. 세션을 고르고 꺼진 서버는 server-process.mjs 로 켬 (ADR 0044·0059)
-app/server-process.mjs    `docent start`, `docent stop`: 명령과 떨어진 프로세스로 서버를 켜고(출력은 DOCENT_HOME/server.log) /api/health 의 pid 로 끔. Windows 는 WMI `Win32_Process.Create` 로 만들어 SSH 세션이 끝나도 남음 (ADR 0057·0058)
+app/server-process.mjs    `docent start`, `docent stop`: 명령과 떨어진 프로세스로 서버를 켜고(출력은 DOCENT_HOME/server.log) /api/health 의 pid 로 끔. Windows 는 WMI `Win32_Process.Create` 로 만들어 SSH 세션이 끝나도 남고, WMI 가 막혔으면 분리 프로세스로 켜고 경고 (ADR 0057·0058·0066)
 app/install-omp.mjs       `docent install-omp`: 프론트매터 + 코어를 결합해 omp 서브에이전트 정의로, `/docent` 확장 복사. 셸 없이 모든 OS 에서 같은 명령 (ADR 0057)
 adapters/omp/docent-command.ts  OMP `/docent` 슬래시 명령. `docent herdr`를 부르는 얇은 확장 (ADR 0044)
 app/doctor.mjs            `docent doctor`: Node, omp와 모델, 서버와 세션 수, 선택적 모델 호출 점검 (ADR 0041)

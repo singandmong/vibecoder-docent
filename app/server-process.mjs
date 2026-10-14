@@ -37,40 +37,55 @@ const tail = (file) => {
 
 /**
  * 서버를 백그라운드로 켠다. 이미 켜져 있으면 그대로 둔다. `args` 는 `--host`, `--peer` 처럼 서버에 넘길 나머지 옵션이다.
- * @returns {Promise<{ started: boolean, url: string, log: string }>}
+ * Windows 에서 WMI 로 만들지 못해 분리 프로세스로 켰으면 `fallback` 에 그 까닭이 있다.
+ * @returns {Promise<{ started: boolean, url: string, log: string, fallback?: string }>}
  */
-export async function startServer({ port, args = [], env = process.env }) {
+export async function startServer({ port, args = [], env = process.env, createWindows = createViaWmi }) {
 	const url = `http://127.0.0.1:${port}/`;
 	const log = serverLog(env);
 	if (await serverAt(port)) return { started: false, url, log };
 	mkdirSync(dirname(log), { recursive: true });
 	const serverArgs = [DOCENT_BIN, "--no-open", "--port", String(port), ...args];
-	let alive = () => !exited;
-	let exited = false;
+	let alive;
+	let fallback = null;
 	if (process.platform === "win32") {
-		const pid = await createViaWmi(serverArgs, log, env);
-		alive = () => {
-			try {
-				process.kill(pid, 0);
-				return true;
-			} catch (error) {
-				return error.code === "EPERM";
-			}
-		};
+		// WMI 가 막혀 있으면(관리 정책, PowerShell 없음) 분리 프로세스로 켠다. 이 창이나 SSH 연결이 끝나면 꺼질 수 있다 (ADR 0066).
+		const pid = await createWindows(serverArgs, log, env).catch((error) => {
+			fallback = error.message;
+			return null;
+		});
+		alive = pid ? () => pidAlive(pid) : spawnDetached(serverArgs, log, env);
 	} else {
-		const fd = openSync(log, "a");
-		const child = spawn(process.execPath, serverArgs, { detached: true, windowsHide: true, stdio: ["ignore", fd, fd], env });
-		closeSync(fd);
-		child.once("exit", () => { exited = true; });
-		child.unref();
+		alive = spawnDetached(serverArgs, log, env);
 	}
 	const deadline = Date.now() + START_WAIT_MS;
 	while (alive() && Date.now() < deadline) {
 		await sleep(300);
-		if (await healthOf(url)) return { started: true, url, log };
+		if (await healthOf(url)) return { started: true, url, log, ...(fallback ? { fallback } : {}) };
 	}
 	const last = tail(log);
 	throw new Error(`도슨트 서버를 켜지 못했어요. 기록: ${log}${last ? `\n${last}` : ""}`);
+}
+
+const pidAlive = (pid) => {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return error.code === "EPERM";
+	}
+};
+
+/** 명령과 떨어진 프로세스로 띄운다. 돌려준 함수는 아직 살아 있으면 참. */
+function spawnDetached(serverArgs, log, env) {
+	let exited = false;
+	const fd = openSync(log, "a");
+	const child = spawn(process.execPath, serverArgs, { detached: true, windowsHide: true, stdio: ["ignore", fd, fd], env });
+	closeSync(fd);
+	child.once("exit", () => { exited = true; });
+	child.once("error", () => { exited = true; });
+	child.unref();
+	return () => !exited;
 }
 
 // Windows OpenSSH 는 세션을 작업 개체(job object)에 넣고 세션이 끝나면 안의 프로세스를 모두 끝낸다. Node 의 분리 프로세스도 못 벗어난다.

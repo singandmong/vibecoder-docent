@@ -20,3 +20,17 @@ await build({
   define: { "process.env.NODE_ENV": '"production"' },
   logLevel: "info",
 });
+
+// 터미널 강조 보정(ADR 0065). 웹과 같은 remark 파서를 터미널 런타임 경로에서 쓰려고 devDependency를 미리 묶어 둔다.
+await build({
+  absWorkingDir: fileURLToPath(new URL("..", import.meta.url)),
+  entryPoints: ["app/terminal-cjk-src.mjs"],
+  outfile: "app/assets/terminal-cjk.js",
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  target: ["es2022"],
+  minify: true,
+  legalComments: "none",
+  logLevel: "info",
+});

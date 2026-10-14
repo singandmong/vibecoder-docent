@@ -17,6 +17,7 @@ import { herdrWorkspaces } from "./herdr-workspaces.mjs";
 import { glossary } from "./review.mjs";
 import { KEYWORD_PROMPT, extractInput, parseExtract, wiki } from "./wiki.mjs";
 import { parsePeers, peerProvider } from "./peers.mjs";
+import { sshAliasFor } from "./ssh-aliases.mjs";
 import { config, favorites, history, saveConfig, saveKeywords, setFavorite } from "./store.mjs";
 import { resolveEvidence } from "./evidence.mjs";
 import { modelCatalog, selectedModel } from "./models.mjs";
@@ -74,7 +75,7 @@ const TAILSCALE_RETRY_MS = [5_000, 10_000, 30_000, 60_000];
 // 호스트별 세션 제공자. 새 호스트는 adapter 모듈 하나 + 여기 한 줄. 뒤에 원격 docent(peers)가 붙는다.
 const catalog = sessionCatalog([
 	...localProviders([ompAdapter, claudeAdapter, codexAdapter, geminiAdapter, piAdapter], { home: HOME, herdr: herdrWorkspaces() }),
-	...Object.entries(PEERS).map(([name, base]) => peerProvider(name, base)),
+	...Object.entries(PEERS).map(([name, base]) => peerProvider(name, base, { ssh: sshAliasFor })),
 ]);
 
 const json = (r, code, body) => {

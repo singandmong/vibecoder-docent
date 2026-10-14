@@ -3,7 +3,7 @@ import test from "node:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { compareSessions, defaultHerdrExec, herdrWorkspaces, mapSessions } from "../app/herdr-workspaces.mjs";
+import { compareSessions, defaultHerdrExec, herdrEntryFor, herdrWorkspaces, mapSessions } from "../app/herdr-workspaces.mjs";
 
 /** 세션 파일 경로. 서버는 키를 resolve 한 절대 경로로 쓰므로 시험도 같은 모양으로 둔다. */
 const P = (name) => resolve("/s", name);
@@ -34,6 +34,23 @@ test("an unnamed workspace is labelled by its number, and a session open in two 
 		JSON.parse(workspacesJson(space("w3K", 1, ""), space("w4B", 4, "뒤쪽"))),
 	);
 	assert.deepEqual(found.get(P("a.jsonl")), { workspace: "w3K", label: "작업 공간 1", number: 1, pane: "w3K:p2" });
+});
+
+test("an agent that reports only a session id is found by the session file name of each host", () => {
+	const id = "019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b";
+	const idAgent = (pane, value) => ({ agent: "codex", agent_session: { agent: "codex", kind: "id", value }, pane_id: pane });
+	const found = mapSessions(
+		JSON.parse(agentsJson(idAgent("w4B:p3", id), idAgent("w3K:p1", "short"), agent("w3K:p2", P("a.jsonl")))),
+		JSON.parse(workspacesJson(space("w3K", 1, "백업"), space("w4B", 4, "도슨트"))),
+	);
+	const expected = { workspace: "w4B", label: "도슨트", number: 4, pane: "w4B:p3" };
+	assert.deepEqual(herdrEntryFor(found, `/home/u/.codex/sessions/2026/10/14/rollout-2026-10-14T01-02-03-${id}.jsonl`), expected);
+	assert.deepEqual(herdrEntryFor(found, `/home/u/.claude/projects/p/${id}.jsonl`), expected);
+	assert.deepEqual(herdrEntryFor(found, `/home/u/.omp/agent/sessions/p/2026-10-14T01-02-03-000Z_${id}.jsonl`), expected);
+	assert.equal(herdrEntryFor(found, `/home/u/.codex/sessions/rollout-${id}-other.jsonl`), null);
+	// 짧은 id 는 받지 않는다. 경로 항목은 그대로 경로로 찾는다.
+	assert.equal(herdrEntryFor(found, "/x/rollout-short.jsonl"), null);
+	assert.deepEqual(herdrEntryFor(found, P("a.jsonl")), { workspace: "w3K", label: "백업", number: 1, pane: "w3K:p2" });
 });
 
 test("herdr is read once per few seconds and a renamed workspace shows after the cache expires", async () => {

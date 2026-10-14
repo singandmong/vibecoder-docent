@@ -1,6 +1,6 @@
 {
   "name": "vibecoder-docent",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "private": true,
   "type": "module",
   "main": "app/desktop/main.cjs",
@@ -34,6 +34,7 @@
     "app/*.mjs",
     "!app/build.mjs",
     "!app/markdown-remark.mjs",
+    "!app/terminal-cjk-src.mjs",
     "app/index.html",
     "app/favicon.svg",
     "app/assets",
