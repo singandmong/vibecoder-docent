@@ -15,5 +15,7 @@ Status: Accepted. ADR 0060(Herdr 작업 공간 이름과 순서)을 넓힌다. �
 
 ## Consequences
 
-- Herdr가 id만 알리는 에이전트의 세션도 목록 맨 위에 작업 공간 순서로 모이고 이름이 붙는다. 실제 Codex 창으로는 확인하지 못했다. 시험 시점의 Codex는 질문을 보내기 전까지 세션을 알리지 않았고, 질문을 보내면 사용자의 모델 한도를 쓰므로 보내지 않았다. 동작은 `tests/herdr-workspaces.test.mjs`의 세 파일 이름 모양으로 고정한다.
+- Herdr가 id만 알리는 에이전트의 세션도 목록 맨 위에 작업 공간 순서로 모이고 이름이 붙는다. 실제 Codex(0.153.4) 창에서 확인했다. Herdr는 `{"kind":"id","source":"herdr:codex"}`로 받았고, 운영 서버(0.25.0) 목록에서 그 `rollout-…-<id>.jsonl`에 작업 공간과 창이 붙었다. 파일 이름 모양은 `tests/herdr-workspaces.test.mjs`로 고정한다.
+- Codex는 첫 질문을 보낸 뒤에야 세션을 알린다(SessionStart 훅의 `transcript_path`가 그때 생김). 그 전에는 목록에 Codex 세션 파일도 없다.
+- Codex의 `shell_environment_policy.inherit = "core"`는 훅 환경에서 `HERDR_*`를 지워 Herdr 연동 훅이 아무것도 알리지 않는다. `inherit = "all"`과 `include_only`에 core 변수, `HERDR_*`, `set`의 변수 이름을 함께 두면 core와 같은 범위에 `HERDR_*`만 더해진다. 설정 파일을 바꾼 뒤에는 이미 떠 있는 `codex app-server`가 다시 시작해야 적용된다(같은 값을 `-c`로 넘긴 새 창에서는 바로 알렸다).
 - Herdr에서 이름을 바꾸면 카드와 열린 세션 정보가 같은 새로고침(최대 15초와 Herdr 캐시 3초)에 바뀐다.
