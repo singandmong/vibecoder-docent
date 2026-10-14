@@ -5,14 +5,17 @@ import { peerProvider } from "../app/peers.mjs";
 
 const HOME = "/home/u";
 
-/** files: 경로 → 내용. readdir 은 같은 폴더 아래 파일 이름을 돌려준다. */
+/** files: 경로 → 내용. readdir 은 같은 폴더 아래 파일 이름을 돌려준다. Windows 의 `D:\home\u\...` 도 `/home/u/...` 로 읽는다. */
 function fakeFs(files) {
+	const norm = (path) => String(path).replace(/\\/g, "/").replace(/^[A-Za-z]:/, "");
 	return {
-		readFile: async (path) => {
+		readFile: async (raw) => {
+			const path = norm(raw);
 			if (!(path in files)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
 			return files[path];
 		},
-		readdir: async (dir) => {
+		readdir: async (raw) => {
+			const dir = norm(raw);
 			const names = Object.keys(files).filter((p) => p.startsWith(`${dir}/`) && !p.slice(dir.length + 1).includes("/")).map((p) => p.slice(dir.length + 1));
 			if (!names.length) throw new Error("ENOENT");
 			return names;

@@ -83,7 +83,6 @@ const isLoopback = (address) => address === "::1" || address.startsWith("127.");
 
 const bounded = (promise, ms) => new Promise((ok) => {
 	const timer = setTimeout(() => ok(null), ms);
-	timer.unref?.();
 	promise.then((value) => { clearTimeout(timer); ok(value); }, () => { clearTimeout(timer); ok(null); });
 });
 
