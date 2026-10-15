@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { DIFFICULTIES, DOMAINS } from "./depth.mjs";
 import { httpError } from "./errors.mjs";
 import { fingerprint, profileFrom, readState, updateState } from "./store.mjs";
-import { selectedModel } from "./models.mjs";
+import { modelCatalog, selectedModel } from "./models.mjs";
 import { PLANNING_KEYWORDS_RULE, parseKeywords } from "./wiki.mjs";
 import { transcriptCwd } from "../scripts/transcript-jsonl.mjs";
 
@@ -30,28 +30,42 @@ function nameOf(name) {
 	return name.trim();
 }
 
+/** 모델 범위: 카탈로그의 정확한 선택값 목록(중복 제거, 500개 이하) 또는 전체를 뜻하는 null. 빈 목록은 전체와 같아 null 로 저장한다. */
+async function validModelScope(scope) {
+	if (scope === null) return null;
+	if (!Array.isArray(scope) || scope.length > 500 || scope.some((entry) => typeof entry !== "string")) throw httpError(400, "모델 범위는 모델 선택값 목록 또는 null이어야 해요.");
+	const unique = [...new Set(scope)];
+	if (!unique.length) return null;
+	const known = new Set((await modelCatalog()).models.map((model) => model.selector));
+	const missing = unique.find((selector) => !known.has(selector));
+	if (missing) throw httpError(400, "모델 범위에 OMP 채팅 모델 카탈로그에 없는 모델이 있어요. 목록을 다시 불러와 고르세요.");
+	return unique;
+}
+
 export function createProfile(name) {
 	const validName = nameOf(name);
 	return updateState((state) => {
-		const item = { id: randomUUID(), name: validName, defaultDifficulty: "NORMAL", domainDifficulties: {}, model: null, autoExplain: false };
+		const item = { id: randomUUID(), name: validName, defaultDifficulty: "NORMAL", domainDifficulties: {}, model: null, modelScope: null, autoExplain: false };
 		state.profiles.push(item);
 		return item;
 	});
 }
 
 export async function updateProfile(id, patch) {
-	if (!object(patch) || Object.keys(patch).some((key) => !["name", "defaultDifficulty", "domainDifficulties", "model", "autoExplain"].includes(key))) throw httpError(400, "지원하지 않는 프로필 설정이에요.");
+	if (!object(patch) || Object.keys(patch).some((key) => !["name", "defaultDifficulty", "domainDifficulties", "model", "modelScope", "autoExplain"].includes(key))) throw httpError(400, "지원하지 않는 프로필 설정이에요.");
 	if (patch.autoExplain !== undefined && typeof patch.autoExplain !== "boolean") throw httpError(400, "미리 설명 켜기는 참/거짓이어야 해요.");
 	if (patch.name !== undefined) nameOf(patch.name);
 	if (patch.defaultDifficulty !== undefined && !DIFFICULTIES.includes(patch.defaultDifficulty)) throw httpError(400, "설명 깊이는 EASY, NORMAL, HARD 중 하나예요.");
 	if (patch.domainDifficulties !== undefined && (!object(patch.domainDifficulties) || Object.entries(patch.domainDifficulties).some(([domain, depth]) => !DOMAINS.includes(domain) || !DIFFICULTIES.includes(depth)))) throw httpError(400, "분야별 설명 깊이 설정이 올바르지 않아요.");
 	if (Object.hasOwn(patch, "model")) await selectedModel(patch.model);
+	if (Object.hasOwn(patch, "modelScope")) patch = { ...patch, modelScope: await validModelScope(patch.modelScope) };
 	return updateState((state) => {
 		const item = profileFrom(state, id);
 		if (patch.name !== undefined) item.name = patch.name.trim();
 		if (patch.defaultDifficulty !== undefined) item.defaultDifficulty = patch.defaultDifficulty;
 		if (patch.domainDifficulties !== undefined) item.domainDifficulties = { ...patch.domainDifficulties };
 		if (Object.hasOwn(patch, "model")) item.model = patch.model;
+		if (Object.hasOwn(patch, "modelScope")) item.modelScope = patch.modelScope;
 		if (patch.autoExplain !== undefined) item.autoExplain = patch.autoExplain;
 		return item;
 	});

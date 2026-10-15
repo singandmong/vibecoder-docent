@@ -21,6 +21,7 @@ import { sshAliasFor } from "./ssh-aliases.mjs";
 import { config, favorites, history, saveConfig, saveKeywords, setFavorite } from "./store.mjs";
 import { resolveEvidence } from "./evidence.mjs";
 import { modelCatalog, selectedModel } from "./models.mjs";
+import { sessionModel } from "./session-model.mjs";
 import { DOMAINS_PROMPT } from "./depth.mjs";
 import { httpError } from "./errors.mjs";
 import { PLANNING_PROMPT, createProfile, feedback, learningItems, profile, profiles, updateProfile } from "./learning.mjs";
@@ -251,6 +252,13 @@ const handler = async (req, res) => {
 			const md = await catalog.transcript(id);
 			res.writeHead(200, { "content-type": "text/markdown; charset=utf-8" });
 			return res.end(md);
+		}
+		// 프로필에서 모델을 고르지 않았을 때 설명에 쓰일 이 세션의 모델 (ADR 0069). model 이 null 이면 omp 기본 모델로 설명한다.
+		if (req.method === "GET" && url.pathname === "/api/session-model") {
+			const id = url.searchParams.get("id") ?? "";
+			const provider = catalog.providerOf(id);
+			const { raw, model } = await sessionModel(await catalog.transcript(id), provider.id);
+			return json(res, 200, { raw, model });
 		}
 		if (req.method === "GET" && url.pathname === "/api/history") {
 			const id = url.searchParams.get("id") || undefined;

@@ -12,6 +12,7 @@ import { jobRegistry } from "./jobs.mjs";
 import { httpError } from "./errors.mjs";
 import { applyClassification, explanationHints, parsePlan, planningContext, planningInput, profile, sourceScope } from "./learning.mjs";
 import { selectedModel } from "./models.mjs";
+import { sessionModel } from "./session-model.mjs";
 import { extractTerms, filterTerms } from "./review.mjs";
 import { CancelledError } from "./runner.mjs";
 import { parseAnswer } from "./slots.mjs";
@@ -168,9 +169,13 @@ export function createAsk({ runner, providerOf, prompts, notify }) {
 		const t0 = Date.now();
 		try {
 			if (job.signal.aborted) throw new CancelledError();
-			const model = await selectedModel(current.model);
+			const chosen = await selectedModel(current.model);
 			const provider = providerOf(id);
 			const [source, records] = await Promise.all([sessionSource(id, provider), history(id, profileId)]);
+			// 프로필에서 고른 모델이 없으면 설명 대상 세션의 모델을 쓴다. 카탈로그에서 못 찾으면 omp 기본 모델로 가고 답에 그렇게 남긴다 (ADR 0069).
+			const fromSession = chosen ? null : (await sessionModel(source.original, provider.id)).model;
+			const model = chosen ?? fromSession;
+			const modelSource = chosen ? "profile" : fromSession ? "session" : "default";
 			const scope = sourceScope(id, provider.host, source.original);
 			const own = threadRows(records, thread);
 			const context = { ...(await planningContext(profileId, scope, q, job.meta.auto, focus)), dialogue: recentDialogue(own), cards };
@@ -196,7 +201,7 @@ export function createAsk({ runner, providerOf, prompts, notify }) {
 			const jevTerms = await filterTerms(raw, ruleTerms);
 			const terms = jevTerms ?? ruleTerms;
 			const termsBy = jevTerms ? "jev" : "rule";
-			const answer = { raw, ...parseAnswer(raw), ms: Date.now() - t0, ...depth, terms, citations, requestId, model: model?.selector ?? null, thread };
+			const answer = { raw, ...parseAnswer(raw), ms: Date.now() - t0, ...depth, terms, citations, requestId, model: model?.selector ?? null, modelSource, thread };
 			const { response, startedAt } = await completeAnswer(begun.request, context, answer, { provider: provider.id, project: scope.cwd ? basename(scope.cwd) : null, terms, termsBy, ...(job.steers.length ? { steers: [...job.steers] } : {}) });
 			classifyLater({ context, response, startedAt, model, sessionId: id, thread, cards });
 			return response;

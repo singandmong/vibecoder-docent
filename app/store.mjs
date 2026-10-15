@@ -31,7 +31,7 @@ async function replaceFile(temp, target) {
 
 const emptyState = () => ({
 	version: 1,
-	profiles: [{ id: "default", name: "기본", defaultDifficulty: "NORMAL", domainDifficulties: {}, model: null, autoExplain: false }],
+	profiles: [{ id: "default", name: "기본", defaultDifficulty: "NORMAL", domainDifficulties: {}, model: null, modelScope: null, autoExplain: false }],
 	items: [],
 	records: [],
 	requests: {},
@@ -79,6 +79,7 @@ export async function readState() {
 	// autoExplain 이 없는 프로필은 0.24 전에 만든 것이다. 그때 기본값이 켜짐이었으니 켜진 채로 둔다 (ADR 0063).
 	for (const profile of state.profiles) {
 		profile.model ??= null;
+		profile.modelScope ??= null;
 		profile.autoExplain ??= true;
 	}
 	return compactAnswerCopies(state);

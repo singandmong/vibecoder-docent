@@ -19,7 +19,7 @@ app/jev.mjs               TypeSafe Jev 의미 판정. 사용 불가 시 구조�
 app/store.mjs             문답·요청 기록 module: learning.json 원자적 저장, 모든 입구에서 프로필 확인, 요청 키·문답 식별자, 요청 상태(시작·완료·실패·중단), 즐겨찾기, 기본 프로필의 기존 questions.jsonl 읽기 (ADR 0052)
 app/learning.mjs          프로필 설정·의미 분류 계획(전사 없이)·핵심 단어·학습 상태·관련 기억 (ADR 0014·0030)
 app/thread.mjs            스레드 식별자: 질문 대상 내용(공백 차이 무시)의 해시, "" 는 세션 전체 대화. 문답마다 스레드를 붙이고, 같은 세션의 앞선 답을 다시 설명한 문답은 그 답의 스레드에 둔다 (ADR 0022·0052·0053)
-app/conversations.mjs     대화 목록과 스레드 소속(서버·웹·터미널 공용, 브라우저에도 정적 파일로 제공): 서버가 붙인 thread 로만 소속을 정함, 세션 전체 대화 + 사건 카드 + 카드 없는 저장 대화(마지막 활동 순), 질문과 함께 보낼 카드 목록 정리, 카드·답의 질문 대상 모양 (ADR 0053)
+app/conversations.mjs     대화 목록과 스레드 소속(서버·웹·터미널 공용, 브라우저에도 정적 파일로 제공): 서버가 붙인 thread 로만 소속을 정함, 세션 전체 대화 + 사건 카드 + 카드 없는 저장 대화(마지막 활동 순, 각 대화의 마지막 답 포함), 질문과 함께 보낼 카드 목록 정리, 카드·답의 질문 대상 모양, 카드의 화면 제목과 3문장 요약(`cardDisplay`, `summarySentences`) (ADR 0053·0068)
 app/session-client.mjs    설명 요청의 화면 쪽 상태 module(웹·터미널 공용, 브라우저에도 정적 파일로 제공): 진행 중인 설명, 대기 질문(순서대로, 다른 세션·프로필 것은 보내지 않음), 중단한 질문을 그 자리의 빈 입력창에 되돌리기, 바로잡기, 같은 requestId 로 다시 붙기(받은 글을 비우고 시작), 끊긴 연결 다시 붙기, 미리 설명 따라가기, 실시간 사건 다시 붙기. 화면은 onChange 알림을 그리기만 함 (ADR 0029·0055)
 app/transport.mjs         서버와 주고받는 transport adapter(웹·터미널 공용, 브라우저에도 정적 파일로 제공): JSON 요청, NDJSON 설명 스트림, SSE 실시간 사건, 서버 {error} 문구와 HTTP 상태를 TransportError 로 (ADR 0055)
 app/models.mjs            omp 채팅 모델 카탈로그·단가·정확한 selector 검증 (ADR 0016)
@@ -35,7 +35,9 @@ app/index.html            세션·작업 내용·카드별 대화·즐겨찾기�
 app/mobile.css           600px 이하 단일 화면 탐색, 터치와 화면 키보드 레이아웃
 app/mobile.mjs           PWA 설치, 연결 안내, 모바일 표시 상태
 app/sw.js                개인 기록 없는 오프라인 안내만 캐시
-app/terminal-ui.mjs       터미널 클라이언트 화면: 대화, 입력창(자리별 초안), 대기 질문, 기호 메뉴, 선택 목록. 대화 목록과 스레드 소속은 conversations.mjs, 설명 요청 상태는 session-client.mjs (ADR 0038·0039·0053·0055)
+app/terminal-ui.mjs       터미널 클라이언트 화면: 대화, 입력창(자리별 초안), 대기 질문, `/` 명령 목록, 선택창(세션·대화·저장된 답변·프로필·설정), 진짜 커서 위치. 대화 목록과 스레드 소속은 conversations.mjs, 설명 요청 상태는 session-client.mjs (ADR 0038·0039·0053·0055·0068)
+app/session-model.mjs     설명 대상 세션의 모델: 정규화 전사의 마지막 `(모델: X)` 표식, omp 카탈로그(60초 캐시)와 맞춰 정확한 모델 하나로. 프로필에 고른 모델이 없을 때의 설명·분류 모델 (ADR 0069)
+app/terminal-select.mjs   터미널 선택창의 상태 없는 부분: 낱말 거르기, 줄 수가 다른 항목의 스크롤 시작점, 한 화면 그리기(검색창, 목록, 미리 보기, 도움말), 입력 위치 커서 칸 (ADR 0068)
 app/terminal-status.mjs   터미널 상태줄 규칙 표와 그리기, 좁은 화면 항목 빼기 (ADR 0040)
 app/terminal-markdown.mjs Pi Markdown 렌더러 연결과 제어 문자 차단. 한글 옆 강조는 `app/assets/terminal-cjk.js`(웹과 같은 remark + `@streamdown/cjk` 파서를 `app/terminal-cjk-src.mjs` 에서 미리 묶은 것)가 강조 구간을 찾아 CommonMark 가 거절할 구분 기호 바깥에 U+FEFF 를 끼우고 렌더 뒤 지움 (ADR 0038·0061·0065)
 app/markdown-remark.mjs   웹 Markdown 의 remark 플러그인 순서. `@streamdown/cjk` 로 한글 옆 강조와 취소선을 풂. 빌드 입력이라 배포 패키지에서 빠짐 (ADR 0061)
@@ -73,7 +75,7 @@ docs/                     개념·범위·결정
 모바일 PWA, 터미널, macOS 앱도 위 웹앱 경로의 같은 서버를 사용한다. 설명과 분류를 화면별로 구현하지 않는다. 같은 서버와 프로필의 문답을 이어 보며, 서로 다른 서버의 학습 기억을 자동으로 합치지 않는다.
 
 - 모바일은 기존 웹 화면을 600px 이하 단일 화면 탐색으로 표시한다. 서비스 워커는 `/offline.html`만 저장하고 `/api/` 응답은 `no-store`다. HTTPS는 사용자가 명시적으로 설정한 Tailscale Serve를 사용하며 공개 Funnel은 금지한다.
-- 터미널은 HTTP와 SSE, NDJSON을 읽는 Node 클라이언트다. 서버는 별도로 실행한다. `terminal-ui.mjs`는 Pi 대화형 모드의 배치(제목과 단축키, 대화, 진행 표시, 가로선 사이 입력창, 두 줄 상태줄)를 그린다. 입력창이 `/`, `@`, `#`, `$` 중 하나로 시작하면 입력창 아래에 명령, 세션, 대화, 설정 목록을 띄우고, 설정은 `PATCH /api/profiles/:id`와 `GET /api/models`로 바꾼다 (ADR 0039). 상태줄은 `terminal-status.mjs`의 규칙 표(`docs/terminal-status-line.md`)로 그리며, 즐겨찾기 수는 `GET /api/favorites`, 학습 시간과 문답 수는 문답 기록, 추론 수준은 `depth.mjs`의 `THINKING`에서 계산한다 (ADR 0040). Ctrl+T로 대화, Ctrl+O로 현재 대화의 답을 고르는 단축키도 남아 있다. 초안과 커서는 프로필, 세션, 스레드, 질문/바로잡기별로 메모리에 보관한다. 답 선택은 읽는 위치만 바꾸며 요청이나 스레드를 만들지 않는다. `terminal-markdown.mjs`는 `@earendil-works/pi-tui`의 Markdown 렌더러로 설명과 원문을 그리며, 렌더링 전에 제어 문자를 제거하고 색 코드 외의 터미널 제어를 내보내지 않는다. `terminal-theme.mjs`의 역할별 색상은 OMP `titanium-prompt-focus` 값이며 본문은 터미널 기본 색을 상속하고 NO_COLOR를 존중한다. 터미널 종료는 서버를 끄지 않는다 (ADR 0038).
+- 터미널은 HTTP와 SSE, NDJSON을 읽는 Node 클라이언트다. 서버는 별도로 실행한다. `terminal-ui.mjs`는 Pi 대화형 모드의 배치(제목과 단축키, 대화, 진행 표시, 가로선 사이 입력창, 두 줄 상태줄)를 그린다. 세션을 고르면 이어서 그 세션의 대화 선택창이 열린다(웹 카드와 같은 제목과 요약 규칙인 `conversations.mjs`의 `cardDisplay`, 새 카드가 위, 고른 항목의 AI 출력 미리 보기). `@`, `#`, `$`를 입력창 첫 글자로 치면 세션, 대화, 설정 선택창이 열리고(Ctrl+P, Ctrl+T, Ctrl+O, Ctrl+G는 같은 창), `/`는 입력창 아래 명령 목록을 띄운다. 선택창은 `terminal-select.mjs`로 그리며 맨 위 검색창에 친 글자로 거르고 PgUp/PgDn으로 한 화면씩 움직인다. 설정은 `PATCH /api/profiles/:id`와 `GET /api/models`로 바꾸고 즐겨찾기는 `GET/POST /api/favorites`다 (ADR 0039·0068). 프레임을 쓴 뒤에는 진짜 터미널 커서를 입력창 캐럿이나 선택창 검색창 위치로 옮겨 보이게 해 한글 조합 글자와 후보 창이 그 자리에 붙게 한다(`DOCENT_HARDWARE_CURSOR=0`이면 숨김). 상태줄은 `terminal-status.mjs`의 규칙 표(`docs/terminal-status-line.md`)로 그리며, 즐겨찾기 수는 `GET /api/favorites`, 학습 시간과 문답 수는 문답 기록, 추론 수준은 `depth.mjs`의 `THINKING`에서 계산한다 (ADR 0040). 초안과 커서는 프로필, 세션, 스레드, 질문/바로잡기별로 메모리에 보관한다. 답 선택은 읽는 위치만 바꾸며 요청이나 스레드를 만들지 않는다. `terminal-markdown.mjs`는 `@earendil-works/pi-tui`의 Markdown 렌더러로 설명과 원문을 그리며, 렌더링 전에 제어 문자를 제거하고 색 코드 외의 터미널 제어를 내보내지 않는다. `terminal-theme.mjs`의 역할별 색상은 OMP `titanium-prompt-focus` 값이며 본문은 터미널 기본 색을 상속하고 NO_COLOR를 존중한다. 터미널 종료는 서버를 끄지 않는다 (ADR 0038). 웹과 다른 점과 남은 계획은 `docs/terminal-parity-plan.md`.
 - macOS 앱은 격리된 Electron 창에서 기존 웹 화면을 연다. `/api/health`의 제품 식별자를 확인해 로컬 서버를 재사용하거나 자식 서버를 시작한다. 앱이 소유한 서버만 종료한다.
 - `GET /api/health`는 `{app: "vibecoder-docent", version, pid}`를 반환한다. 서버 확인용이지 사용자 인증 수단이 아니다. `docent stop`은 이 pid 로 이 컴퓨터에서 신호를 보내며, HTTP로 서버를 끄는 경로는 없다 (ADR 0057).
 
@@ -101,7 +103,7 @@ docs/                     개념·범위·결정
 5. 대화에는 짧은 결론과 핵심 설명을 먼저 그리고 세부 내용을 접어 둔다. "원문 보기"는 `/api/evidence`로 왼쪽 서랍(세션 목록 + 작업 내용 칸 너비)을 열고, 에이전트·사용자 원문은 Markdown으로, 도구 결과는 고정폭으로 보여 준다. 앱이 만든 요청문은 서버가 준 `display`로 보여 준다. 답의 `suggest`가 있으면 해당 카드 대화로 옮기기 버튼을 둔다.
 6. 프로필/세션 전환 시 이전 응답을 새 화면에 반영하지 않는다. 같은 requestId의 재전송은 저장한 결과를 돌려주고, 새로운 의문은 새 ID로 다시 설명한다.
 
-`GET /api/models`는 설치된 omp 카탈로그를 공개 필드만 골라 반환한다. 프로필의 `model`은 정확한 selector 또는 null이며, `PATCH /api/profiles/:id`로 저장한다. 새 설명 요청은 시작 시 이 값을 고정하고 분류·설명 모두 같은 provider/model로 호출한다. 명시적 모델 실행 실패는 기본 모델로 대체하지 않는다. `answer.model`은 요청 당시 선택값이며 실제 과금·호스트 내부 실행 계측값은 아니다. 가격은 USD/백만 토큰 참고값으로 입력·출력을 나눠 표시한다. 완료 요청 재전송은 이후 모델 설정이나 카탈로그가 바뀌어도 기존 답과 모델 선택을 유지한다.
+`GET /api/models`는 설치된 omp 카탈로그를 공개 필드만 골라 반환한다. 프로필의 `model`은 정확한 selector 또는 null이며, `PATCH /api/profiles/:id`로 저장한다. `model`이 null(기본)이면 설명 대상 세션의 모델을 쓴다: `session-model.mjs`가 정규화 전사의 마지막 `(모델: X)` 표식을 카탈로그의 정확한 모델 하나로 바꾸고(omp는 `공급자/id`, Claude와 Codex는 id만 적으므로 같은 id가 여러 공급자에 있으면 세션 호스트의 공급자가 하나로 가려질 때만 고름), 못 찾으면 omp 기본 모델로 간다. `GET /api/session-model?id=`가 이 결과를 `{raw, model}`로 보여 준다. 새 설명 요청은 시작 시 모델을 고정하고 분류·설명 모두 같은 provider/model로 호출한다. 프로필에서 명시적으로 고른 모델의 실행 실패는 다른 모델로 대체하지 않는다. `answer.model`은 요청 당시 선택값이고 `answer.modelSource`는 `profile`, `session`, `default`(omp 기본 모델) 중 하나이며 실제 과금·호스트 내부 실행 계측값은 아니다. 프로필의 `modelScope`는 모델 선택 목록을 좁히는 selector 목록 또는 null(전체)이고 설명에 쓰이는 모델은 바꾸지 않는다. 가격은 USD/백만 토큰 참고값으로 입력·출력을 나눠 표시한다. 완료 요청 재전송은 이후 모델 설정이나 카탈로그가 바뀌어도 기존 답과 모델 선택을 유지한다 (ADR 0016·0069).
 
 ## 라이브 흐름 (ADR 0006)
 

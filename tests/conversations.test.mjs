@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 process.env.DOCENT_HOME = await mkdtemp(join(tmpdir(), "docent-conversations-test-"));
 process.env.TYPESAFE_API_KEY = "";
-const { answerFocus, cardsPayload, conversationList, excerpt, threadRows } = await import("../app/conversations.mjs");
+const { answerFocus, cardDisplay, cardsPayload, conversationList, excerpt, threadRows } = await import("../app/conversations.mjs");
 const { threadKey, threadOf, withThreads } = await import("../app/thread.mjs");
 const { focusOfEvent } = await import("../app/dialogue.mjs");
 const { createAsk } = await import("../app/ask.mjs");
@@ -162,4 +162,24 @@ test("the server's thread for a question and the client's conversation rows agre
 	assert.equal(runner.conversations.length, 1);
 	assert.equal(runner.conversations[0].length, 2);
 	await asks.close();
+});
+
+test("a card shows its answer's title and at most three plain sentences, and falls back to its focus label before an answer", () => {
+	assert.deepEqual(cardDisplay(null, "원래 제목"), { title: "원래 제목", summary: "" });
+	const answer = {
+		headline: "**결론**: 검색 상태는 서버가 들고 있어요.",
+		explain: "## 흐름\n- 첫째 문장이에요. 둘째 문장이에요. 셋째 문장이에요. 넷째 문장이에요.\n```js\nconst code = 1;\n```",
+	};
+	assert.deepEqual(cardDisplay(answer, "원래 제목"), {
+		title: "결론: 검색 상태는 서버가 들고 있어요.",
+		summary: "흐름 첫째 문장이에요. 둘째 문장이에요.",
+	});
+	assert.equal(cardDisplay({ title: "짧은 제목", headline: "결론 한 줄입니다." }, "x").summary, "결론 한 줄입니다.", "an explicit title moves the conclusion into the summary");
+});
+
+test("each conversation option carries the last answer of its thread", () => {
+	const rows = [{ thread: "t1", ts: "1", answer: { headline: "첫 답" } }, { thread: "t1", ts: "2", answer: { headline: "마지막 답" } }];
+	const list = conversationList(rows, [{ thread: "t1", focus: { label: "카드", text: "본문" } }]);
+	assert.equal(list.find((option) => option.thread === "t1").answer.headline, "마지막 답");
+	assert.equal(list.find((option) => option.kind === "all").answer, null);
 });

@@ -85,10 +85,16 @@ export class HttpTransport {
 	profiles(signal) { return this.json("/api/profiles", { signal }); }
 	sessions(signal) { return this.json("/api/sessions", { signal }); }
 	models(signal) { return this.json("/api/models", { signal }); }
+	/** 이 세션의 모델(모델을 고르지 않았을 때 설명에 쓰임). {raw, model}: model 이 null 이면 omp 기본 모델 */
+	sessionModel(sessionId, signal) { return this.json(`/api/session-model?${new URLSearchParams({ id: sessionId })}`, { signal }); }
 	updateProfile(id, patch) { return this.json(`/api/profiles/${encodeURIComponent(id)}`, { method: "PATCH", body: patch }); }
 	favorites(sessionId, profileId, signal) {
 		const query = new URLSearchParams({ profileId, id: sessionId });
 		return this.json(`/api/favorites?${query}`, { signal });
+	}
+	/** 즐겨찾기 켜기/끄기. focus 는 {label, text} 또는 세션 전체 대화(null). */
+	setFavorite(sessionId, profileId, favorite, focus) {
+		return this.json("/api/favorites", { method: "POST", body: { profileId, id: sessionId, favorite, focus } });
 	}
 
 	history(sessionId, profileId, signal) {

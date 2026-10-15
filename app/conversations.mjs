@@ -14,6 +14,28 @@ export function blockTitle(text) {
 	return line.length > 100 ? `${line.slice(0, 100)}…` : line;
 }
 
+/** 카드에는 설명의 앞부분만 평문 3문장 이내로 둔다. 전문은 대화에서 본다 (ADR 0018). */
+export function summarySentences(text, max = 3) {
+	const lines = String(text ?? "").replace(/```[\s\S]*?```/g, "").split("\n")
+		.filter((line) => !/^\s*\|/.test(line))
+		.map((line) => line.replace(/^\s*(?:[#>*+-]+\s*|\d+[.)]\s+)*/, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/\*\*|__|`/g, "").trim())
+		.filter(Boolean);
+	return lines.flatMap((line) => line.split(/(?<=[.!?。])\s+/)).filter(Boolean).slice(0, max).join(" ");
+}
+
+/**
+ * 카드 한 장에 보이는 제목과 요약. 답이 있으면 답에서 만들고, 없으면 질문 대상 제목만 있다.
+ * 서버에 보내는 질문 대상은 사건 원문 그대로이고 이 제목은 화면용이다.
+ * @param {{title?: string, headline?: string, explain?: string, details?: string[]}|null|undefined} answer
+ * @param {string} label 사건의 질문 대상 제목
+ */
+export function cardDisplay(answer, label) {
+	if (!answer) return { title: label, summary: "" };
+	const title = answer.title || blockTitle(answer.headline) || label;
+	const conclusion = answer.title ? blockTitle(answer.headline) : "";
+	return { title, summary: summarySentences([conclusion, answer.explain || answer.details?.[0]].filter(Boolean).join("\n")) };
+}
+
 /** 긴 내용은 앞뒤를 남기고 가운데를 줄인다. 카드의 질문 대상이 이 모양이라 표시를 바꾸면 스레드가 달라진다. */
 export function excerpt(text, max = FOCUS_MAX) {
 	const value = String(text ?? "");
@@ -39,7 +61,7 @@ export const threadRows = (rows, thread) => rows.filter((row) => inThread(row, t
  * 카드가 목록에 없는 저장 스레드(마지막 문답이 최근인 순)다.
  * @param {{thread?: string, ts?: string, focus?: {label?: string, text?: string}}[]} rows 서버 history() 문답(시간순)
  * @param {{thread?: string, focus?: {label: string, text: string}}[]} cards 서버가 질문 대상과 스레드를 붙인 카드
- * @returns {{kind: "all"|"card"|"saved", thread: string, focus: {label: string, text: string}|null, card: object|null, label: string, count: number, lastTs: string|null}[]}
+ * @returns {{kind: "all"|"card"|"saved", thread: string, focus: {label: string, text: string}|null, card: object|null, label: string, count: number, lastTs: string|null, answer: object|null}[]} answer 는 그 스레드의 마지막 문답의 답
  */
 export function conversationList(rows, cards) {
 	const byThread = new Map();
@@ -50,7 +72,7 @@ export function conversationList(rows, cards) {
 	}
 	const activity = (thread) => {
 		const own = byThread.get(thread) ?? [];
-		return { count: own.length, lastTs: own.at(-1)?.ts ?? null };
+		return { count: own.length, lastTs: own.at(-1)?.ts ?? null, answer: own.at(-1)?.answer ?? null };
 	};
 	const list = [{ kind: "all", thread: "", focus: null, card: null, label: "세션 전체 대화", ...activity("") }];
 	const seen = new Set([""]);

@@ -19,9 +19,11 @@ export function terminalSafeText(value) {
 		.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "");
 }
 
+const segmenter = typeof Intl.Segmenter === "function" ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : null;
+
 export function graphemes(value) {
 	const text = String(value ?? "");
-	if (typeof Intl.Segmenter === "function") return [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)].map((part) => part.segment);
+	if (segmenter) return Array.from(segmenter.segment(text), (part) => part.segment);
 	return Array.from(text);
 }
 
@@ -55,6 +57,70 @@ export function wrapTerminalText(value, width) {
 		lines.push(line);
 	}
 	return lines.length ? lines : [""];
+}
+
+/**
+ * 입력창 글을 `columns` 칸으로 접고(글자는 쪼개지 않음), 커서(글자 단위 위치)가 놓인 줄·글자 순번·칸을 돌려준다.
+ * 커서는 글자 위이거나 글 끝의 빈 칸이다. 줄 끝에 놓인 커서 칸은 `columns` 칸 바로 다음(여유 한 칸)까지 갈 수 있다.
+ * 탭은 네 칸 공백으로 보인다. 줄바꿈 글자는 줄 사이로만 쓰이고 줄 안에는 남지 않는다.
+ * @returns {{lines: string[][], caret: {line: number, index: number, col: number}}} lines 는 줄마다 글자 배열
+ */
+export function layoutDraft(text, cursor, columns) {
+	const limit = Math.max(1, Math.floor(columns));
+	const parts = graphemes(text);
+	const at = Math.max(0, Math.min(Math.floor(cursor) || 0, parts.length));
+	const lines = [[]];
+	let used = 0, caret = null;
+	for (let i = 0; i <= parts.length; i++) {
+		const part = parts[i];
+		if (part === "\n") {
+			if (i === at) caret = { line: lines.length - 1, index: lines.at(-1).length, col: used };
+			lines.push([]);
+			used = 0;
+			continue;
+		}
+		const size = part === undefined ? 0 : part === "\t" ? 4 : graphemeWidth(part);
+		if (part !== undefined && used && used + size > limit) { lines.push([]); used = 0; }
+		if (i === at) caret = { line: lines.length - 1, index: lines.at(-1).length, col: used };
+		if (part === undefined) break;
+		lines.at(-1).push(part === "\t" ? "    " : part);
+		used += size;
+	}
+	return { lines, caret };
+}
+
+/**
+ * 한 줄 입력(선택 목록의 검색창)을 키 입력으로 고친다. line = {text, cursor(글자 단위)} 를 직접 바꾸고, 처리했으면 true.
+ * 붙여넣은 줄바꿈은 공백이 되고 `limit` 글자를 넘는 입력은 버린다.
+ */
+export function editLine(line, event, limit = 200) {
+	const parts = graphemes(line.text);
+	const at = Math.max(0, Math.min(line.cursor, parts.length));
+	const set = (next, cursor) => { line.text = next.join(""); line.cursor = cursor; };
+	if (event.type === "text" || event.type === "paste") {
+		const added = graphemes(event.type === "paste" ? String(event.text ?? "").replace(/\s*\n\s*/g, " ") : event.text);
+		if (!added.length || parts.length + added.length > limit) return true;
+		set([...parts.slice(0, at), ...added, ...parts.slice(at)], at + added.length);
+		return true;
+	}
+	if (event.type !== "key") return false;
+	switch (event.key) {
+		case "left": line.cursor = Math.max(0, at - 1); return true;
+		case "right": line.cursor = Math.min(parts.length, at + 1); return true;
+		case "home": line.cursor = 0; return true;
+		case "end": line.cursor = parts.length; return true;
+		case "backspace": if (at > 0) set([...parts.slice(0, at - 1), ...parts.slice(at)], at - 1); return true;
+		case "delete": if (at < parts.length) set([...parts.slice(0, at), ...parts.slice(at + 1)], at); return true;
+		case "clear": set([], 0); return true;
+		case "delete-word": {
+			let start = at;
+			while (start > 0 && /^\s+$/u.test(parts[start - 1])) start--;
+			while (start > 0 && !/^\s+$/u.test(parts[start - 1])) start--;
+			set([...parts.slice(0, start), ...parts.slice(at)], start);
+			return true;
+		}
+		default: return false;
+	}
 }
 
 function cleanPaste(value) {
@@ -173,7 +239,7 @@ export class TerminalInput {
 				"\u0008": "backspace", "\u007f": "backspace", "\t": "tab", "\u0001": "home",
 				"\u0005": "end", "\u000b": "newline", "\u0015": "clear", "\u0017": "delete-word",
 				"\u0007": "ctrl-g", "\u000f": "ctrl-o", "\u0010": "ctrl-p",
-				"\u0012": "ctrl-r", "\u0013": "ctrl-s", "\u0014": "ctrl-t",
+				"\u0012": "ctrl-r", "\u0013": "ctrl-s", "\u0014": "ctrl-t", "\u0006": "ctrl-f",
 			};
 			if (controls[char]) this.onKey({ type: "key", key: controls[char] });
 			else if (char.codePointAt(0) >= 0x20 && char.codePointAt(0) !== 0x7f && !(char.codePointAt(0) >= 0x80 && char.codePointAt(0) <= 0x9f)) {

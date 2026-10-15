@@ -242,6 +242,12 @@
   #modelPrices div { display:flex; gap:8px }
   #modelPrices dt { color:var(--mute) }
   #modelPrices dd { margin:0; font-variant-numeric:tabular-nums }
+  #modelScopeBox > summary { cursor:pointer; color:var(--accent-ink); padding:4px 0 }
+  #modelScopeList { display:flex; flex-direction:column; gap:6px; max-height:240px; overflow:auto; margin:8px 0; padding:8px 10px; border:1px solid var(--line); border-radius:8px }
+  #modelScopeList label { display:flex; align-items:flex-start; gap:8px; margin:0; overflow-wrap:anywhere }
+  #modelForm #modelScopeList input { width:auto; flex:none; margin:4px 0 0 }
+  #modelScopeList .scope-group { margin-top:4px; font-size:12px; color:var(--mute) }
+  #modelScopeActions { display:flex; flex-wrap:wrap; gap:8px }
   .notice { font-size:12px; color:var(--mute); white-space:pre-wrap; overflow-wrap:anywhere }
   .depth-row { margin-bottom:8px; font-size:13px }
   #q { min-width:0 }
@@ -581,9 +587,16 @@
         <label for="modelSearch">모델 검색</label>
         <input id="modelSearch" type="search" placeholder="제공자, 모델 이름, 선택자" autocomplete="off" disabled />
         <label for="docentModel">모델 선택</label>
-        <select id="docentModel" disabled><option value="">omp 기본 모델</option></select>
+        <select id="docentModel" disabled><option value="">세션의 모델 (기본)</option></select>
         <dl id="modelPrices"><div><dt>입력 단가</dt><dd id="modelInputPrice">미상</dd></div><div><dt>출력 단가</dt><dd id="modelOutputPrice">미상</dd></div></dl>
         <p class="notice">입출력 단가 : 100만 토큰 당 예상 비용(USD)으로 실제 비용과 다를 수 있음</p>
+        <details id="modelScopeBox">
+          <summary>모델 범위 <small id="modelScopeCount"></small></summary>
+          <p class="notice">범위를 정하면 위 모델 선택에 범위 안의 모델과 지금 고른 모델만 보여요. 범위를 해제하면 모든 모델이 보여요. 위 검색어로 아래 목록도 거를 수 있어요.</p>
+          <div id="modelScopeList" role="group" aria-label="모델 범위"></div>
+          <div id="modelScopeActions"><button id="modelScopeSave" type="button">범위 저장</button><button id="modelScopeClear" type="button">범위 해제</button></div>
+          <div id="modelScopeNotice" class="notice" role="status"></div>
+        </details>
         <div id="modelCatalogNotice" class="notice" role="status"></div>
         <button id="modelSave" type="submit" disabled>모델 저장</button>
         <div id="modelNotice" class="notice" role="status"></div>
@@ -615,7 +628,7 @@
 <script type="module">
 import { mountMarkdown, unmountMarkdown } from "/assets/docent-markdown.js";
 import { mobileView } from "/mobile.mjs";
-import { answerFocus, blockTitle, conversationList, excerpt, inThread } from "/conversations.mjs";
+import { answerFocus, cardDisplay, conversationList, excerpt, inThread } from "/conversations.mjs";
 import { HttpTransport } from "/transport.mjs";
 import { createSessionClient } from "/session-client.mjs";
 const $ = (s) => document.querySelector(s);
@@ -642,7 +655,7 @@ let theme = THEMES.includes(saved("theme")) ? saved("theme") : "auto", view = "c
 let sessionRequest = 0, reviewRequest = 0, evidenceRequest = 0, sessionsRequest = 0;
 let refreshedAt = null, refreshFailed = false, glossary = [], historyLoading = false;
 const pastByThread = new Map(), preferencesPending = new Set();
-let modelCatalog = null, modelCatalogLoading = false, modelCatalogError = "", modelFormProfileId = null, modelDraft = "";
+let modelCatalog = null, modelCatalogLoading = false, modelCatalogError = "", modelFormProfileId = null, modelDraft = "", scopeDraft = new Set(), sessionModelInfo = null;
 let prefetchInfo = null, prefetchFailed = false;
 const eventCards = new Map();
 const state = { draft: "", latest: null, focus: null, status: "" };
@@ -919,10 +932,19 @@ function modelPrice(value) {
   return Number.isFinite(value) && value >= 0 ? `$${value.toLocaleString("en-US", { maximumFractionDigits: 8 })}` : "미상";
 }
 
+/** 모델을 고르지 않았을 때(기본) 설명에 쓰이는 이 세션의 모델을 한 줄로 (ADR 0069). */
+function sessionModelLabel() {
+  if (!current) return "세션을 고르면 그 세션의 모델로 설명해요";
+  if (!sessionModelInfo) return "이 세션의 모델을 확인하는 중";
+  const model = sessionModelInfo.model;
+  if (model) return `${model.name} (${model.selector})`;
+  return sessionModelInfo.raw ? `${sessionModelInfo.raw}는 omp 카탈로그에 없어 omp 기본 모델로 설명해요` : "기록에 모델이 없어 omp 기본 모델로 설명해요";
+}
+
 function renderModelSelection() {
   const p = profiles.find((entry) => entry.id === profileId), pending = preferencesPending.has(profileId);
   const selected = modelCatalog?.find((entry) => entry.selector === modelDraft);
-  $("#modelCurrent").textContent = `현재 모델: ${p?.model ?? "omp 기본 모델"}`;
+  $("#modelCurrent").textContent = p?.model ? `현재 모델: ${p.model}` : `현재 모델: 세션의 모델. ${sessionModelLabel()}`;
   $("#modelInputPrice").textContent = modelPrice(selected?.cost?.input);
   $("#modelOutputPrice").textContent = modelPrice(selected?.cost?.output);
   $("#docentModel").disabled = !p || pending;
@@ -930,18 +952,47 @@ function renderModelSelection() {
   $("#modelSave").disabled = !p || pending || modelDraft === (p.model ?? "") || (modelDraft !== "" && !selected);
 }
 
+/** 모델 범위 목록: 제공자별 체크 목록. 위 검색어로 거른다. 저장 전 선택은 scopeDraft 에 둔다. */
+function renderModelScope() {
+  const p = profiles.find((entry) => entry.id === profileId), box = $("#modelScopeList");
+  const query = $("#modelSearch").value.trim().toLocaleLowerCase();
+  box.replaceChildren();
+  let provider = null;
+  for (const model of modelCatalog ?? []) {
+    if (query && !scopeDraft.has(model.selector) && !`${model.provider} ${model.name} ${model.selector}`.toLocaleLowerCase().includes(query)) continue;
+    if (model.provider !== provider) { provider = model.provider; box.append(el("div", "scope-group", provider)); }
+    const label = el("label"), input = el("input");
+    input.type = "checkbox"; input.checked = scopeDraft.has(model.selector); input.disabled = !p;
+    input.onchange = () => { input.checked ? scopeDraft.add(model.selector) : scopeDraft.delete(model.selector); renderModelScopeCount(); };
+    label.append(input, `${model.name} ${model.selector}`);
+    box.append(label);
+  }
+  renderModelScopeCount();
+}
+
+function renderModelScopeCount() {
+  const p = profiles.find((entry) => entry.id === profileId);
+  $("#modelScopeCount").textContent = p?.modelScope?.length ? `저장됨 ${p.modelScope.length}개${scopeDraft.size !== p.modelScope.length ? `, 지금 고른 것 ${scopeDraft.size}개` : ""}` : `전체${scopeDraft.size ? `, 지금 고른 것 ${scopeDraft.size}개` : ""}`;
+  $("#modelScopeSave").disabled = !p || preferencesPending.has(profileId) || !modelCatalog;
+  $("#modelScopeClear").disabled = !p || preferencesPending.has(profileId) || !p?.modelScope;
+}
+
 function renderModelSettings() {
   const p = profiles.find((entry) => entry.id === profileId);
   if (modelFormProfileId !== profileId) {
     modelFormProfileId = p?.id ?? null; modelDraft = p?.model ?? "";
-    $("#modelSearch").value = ""; $("#modelNotice").textContent = "";
+    scopeDraft = new Set(p?.modelScope ?? []);
+    $("#modelSearch").value = ""; $("#modelNotice").textContent = ""; $("#modelScopeNotice").textContent = "";
   }
   const select = $("#docentModel"), query = $("#modelSearch").value.trim().toLocaleLowerCase();
-  const defaultOption = el("option", null, "omp 기본 모델"); defaultOption.value = "";
+  const scope = p?.modelScope?.length ? new Set(p.modelScope) : null;
+  const defaultOption = el("option", null, "세션의 모델 (기본)"); defaultOption.value = "";
   select.replaceChildren(defaultOption);
   const groups = new Map();
   for (const model of modelCatalog ?? []) {
-    if (model.selector !== modelDraft && query && !`${model.provider} ${model.name} ${model.selector}`.toLocaleLowerCase().includes(query)) continue;
+    const keep = model.selector === modelDraft || model.selector === p?.model;
+    if (!keep && scope && !scope.has(model.selector)) continue;
+    if (!keep && query && !`${model.provider} ${model.name} ${model.selector}`.toLocaleLowerCase().includes(query)) continue;
     let group = groups.get(model.provider);
     if (!group) { group = el("optgroup"); group.label = model.provider; groups.set(model.provider, group); select.append(group); }
     const option = el("option", null, `${model.name} (입력 ${modelPrice(model.cost?.input)}, 출력 ${modelPrice(model.cost?.output)}) ${model.selector}`);
@@ -959,10 +1010,19 @@ function renderModelSettings() {
     notice.append(button("다시 불러오기", loadModelCatalog));
   } else if (modelCatalog) {
     const matches = [...groups.values()].reduce((count, group) => count + group.children.length, 0);
-    notice.textContent = query ? `검색 결과 ${matches}개` : "";
+    notice.textContent = query ? `검색 결과 ${matches}개` : scope ? `범위 ${scope.size}개 중 ${matches}개 표시` : "";
     if (modelDraft && !modelCatalog.some((entry) => entry.selector === modelDraft)) notice.append(el("div", null, "저장된 모델이 목록에 없음. 다른 모델 선택 전까지 유지."));
   }
   renderModelSelection();
+  renderModelScope();
+}
+
+async function loadSessionModel(c) {
+  sessionModelInfo = null; renderModelSelection();
+  try {
+    const info = await server.json(`/api/session-model?id=${encodeURIComponent(c.sessionId)}`);
+    if (isCurrent(c)) { sessionModelInfo = info; renderModelSelection(); }
+  } catch { /* 표시만 못 한다. 설명은 서버가 같은 규칙으로 정한다. */ }
 }
 
 async function loadModelCatalog() {
@@ -1322,7 +1382,7 @@ async function select(s) {
   const log = $("#log"), flow = $("#flow"); clearSurface(log); clearSurface(flow);
   flow.append(el("p", "empty flow-empty", "AI의 질문, 결과, 계획이 도착하면 여기에 쌓여요."));
   $("#liveNotice").textContent = ""; state.status = ""; setStage(); syncComposer();
-  loadGlossary();
+  loadGlossary(); void loadSessionModel(c);
   try {
     const [past, favs] = await Promise.all([server.history(s.id, c.profileId), server.favorites(s.id, c.profileId)]);
     if (!isCurrent(c)) return;
@@ -1575,23 +1635,13 @@ function eventState(card, text, status = "waiting") {
   node.classList.toggle("wait", status === "queued" || status === "running");
 }
 
-/** 카드에는 설명의 앞부분만 평문 3문장 이내로 둔다. 전문은 대화에서 본다. */
-function summarySentences(text, max = 3) {
-  const lines = String(text ?? "").replace(/```[\s\S]*?```/g, "").split("\n")
-    .filter((line) => !/^\s*\|/.test(line))
-    .map((line) => line.replace(/^\s*(?:[#>*+-]+\s*|\d+[.)]\s+)*/, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/\*\*|__|`/g, "").trim())
-    .filter(Boolean);
-  return lines.flatMap((line) => line.split(/(?<=[.!?。])\s+/)).filter(Boolean).slice(0, max).join(" ");
-}
-
 function attachCardAnswer(card, answer) {
   card.answer = answer;
-  // 제목은 세션 제목처럼 짧은 요약, 결론 문장은 아래 요약의 첫 문장으로 둔다.
+  // 제목은 세션 제목처럼 짧은 요약, 결론 문장은 아래 요약의 첫 문장으로 둔다 (conversations.mjs 의 cardDisplay).
   // 서버에 보내는 질문 대상(focus)은 사건 원문 그대로 두고, 화면 제목만 따로 둔다.
-  const title = answer.title || blockTitle(answer.headline) || card.focus.label, open = card.querySelector(".event-open");
+  const { title, summary } = cardDisplay(answer, card.focus.label), open = card.querySelector(".event-open");
   card.displayTitle = title; open.textContent = title; open.title = title;
-  const conclusion = answer.title ? blockTitle(answer.headline) : "";
-  card.querySelector(".event-summary").textContent = summarySentences([conclusion, answer.explain || answer.details?.[0]].filter(Boolean).join("\n"));
+  card.querySelector(".event-summary").textContent = summary;
   eventState(card, "", "ready");
 }
 
@@ -1799,7 +1849,7 @@ function renderAnswer(r, c = capture(), compact = false) {
   if (suggested) actions.append(button(`‘${r.suggest.label || suggested.displayTitle || suggested.focus.label}’ 카드 대화로 옮기기`, () => { if (isCurrent(c)) openThread(suggested.focus); }));
   if (actions.childElementCount) a.append(actions);
   const depthSource = { question: "바로 질문", domain: "영역별 설정", profile: "기본값" }[r.difficultySource];
-  const requestedModel = r.model === null ? "omp 기본 모델" : typeof r.model === "string" ? r.model : null;
+  const requestedModel = typeof r.model === "string" ? `${r.model}${r.modelSource === "session" ? " (세션 모델)" : ""}` : r.model === null ? (r.modelSource === "default" ? "omp 기본 모델 (세션 모델을 알 수 없음)" : "omp 기본 모델") : null;
   a.append(el("div", "meta", [r.difficulty ? `설명 모드 ${r.difficulty}${depthSource ? ` (${depthSource})` : ""}` : "", requestedModel ? `요청 모델: ${requestedModel}` : "", Number.isFinite(r.ms) ? `${Math.round(r.ms / 1000)}초 걸림` : ""].filter(Boolean).join(", ")));
   return a;
 }
@@ -2354,6 +2404,20 @@ $("#modelForm").onsubmit = async (e) => {
     if (profileId === c.profileId) { $("#preferencesSave").disabled = false; renderModelSelection(); }
   }
 };
+async function saveModelScope(scope) {
+  const c = capture();
+  if (preferencesPending.has(c.profileId)) return;
+  preferencesPending.add(c.profileId); renderModelScopeCount(); $("#modelScopeNotice").textContent = "저장 중.";
+  try {
+    const p = await server.json(`/api/profiles/${encodeURIComponent(c.profileId)}`, { method: "PATCH", body: { modelScope: scope } });
+    profiles = profiles.map((entry) => entry.id === p.id ? p : entry);
+    if (profileId === p.id) { scopeDraft = new Set(p.modelScope ?? []); renderModelSettings(); }
+    if (isCurrent(c)) $("#modelScopeNotice").textContent = p.modelScope ? "저장됨. 모델 선택 목록에 범위 안의 모델만 보여요." : "범위를 해제했어요. 모든 모델이 보여요.";
+  } catch (error) { if (isCurrent(c)) $("#modelScopeNotice").textContent = `모델 범위 저장 실패: ${error.message}`; }
+  finally { preferencesPending.delete(c.profileId); if (profileId === c.profileId) { renderModelSelection(); renderModelScopeCount(); } }
+}
+$("#modelScopeSave").onclick = () => saveModelScope([...scopeDraft]);
+$("#modelScopeClear").onclick = () => saveModelScope(null);
 $("#preferencesForm").onsubmit = async (e) => {
   e.preventDefault();
   if ($("#preferencesSave").disabled) return;

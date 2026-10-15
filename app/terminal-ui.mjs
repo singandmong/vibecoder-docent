@@ -1,11 +1,12 @@
-import { conversationList, threadRows } from "./conversations.mjs";
+import { cardDisplay, conversationList, excerpt, summarySentences, threadRows } from "./conversations.mjs";
 import { createSessionClient } from "./session-client.mjs";
 import { HttpTransport } from "./transport.mjs";
-import { TerminalInput, graphemes, terminalSafeText, wrapTerminalText } from "./terminal-input.mjs";
+import { TerminalInput, editLine, graphemes, layoutDraft, terminalSafeText, wrapTerminalText } from "./terminal-input.mjs";
 import { createTerminalTheme } from "./terminal-theme.mjs";
 import { createTerminalMarkdown } from "./terminal-markdown.mjs";
 import { renderStatusRow, statusMetrics, statusSegments, statusSymbols } from "./terminal-status.mjs";
 import { createHerdrReporter } from "./terminal-herdr.mjs";
+import { filterItems, renderSelector, withCaret } from "./terminal-select.mjs";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const ESC = "\u001b[";
@@ -101,16 +102,20 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		cards: [], cardKeys: new Set(), history: [],
 		focus: null, thread: "",
 		purpose: "ask", drafts: new Map(),
-		picker: "sessions", pickerIndex: { sessions: 0, profiles: 0, conversations: 0, answers: 0 },
+		picker: null, // {kind, query:{text,cursor}, index, start, page, touched, auto} 선택창이 열려 있을 때
 		selectedAnswer: null, settling: null,
 		bodyScroll: 0, followSelection: true, followBottom: false,
 		notice: "", noticeError: false, noticeKind: "info", liveNotice: "",
 		completion: { key: "", index: 0, dismissed: null }, models: null, favorites: null,
+		sessionModel: null, // 이 세션의 모델 {raw, model}. 모델을 고르지 않았을 때(기본) 설명에 쓰인다 (ADR 0069)
+		scopeDraft: new Set(), // 모델 범위 선택창에서 고르는 중인 모델
 	};
 	let renderTimer = null;
 	const FRAME_MS = 16;
 	let lastRenderAt = 0;
-	let painted = { size: "", rows: [] }; // 마지막으로 화면에 쓴 줄. 바뀐 줄만 다시 쓰는 기준
+	let painted = { size: "", rows: [], cursor: "" }; // 마지막으로 화면에 쓴 줄과 커서. 바뀐 것만 다시 쓰는 기준
+	// OMP 의 showHardwareCursor 처럼 진짜 터미널 커서를 입력 위치에 두고 보인다. 한글 조합 글자와 후보 창이 그 자리에 붙는다 (ADR 0068).
+	const hardwareCursor = !["0", "false", "off"].includes(String(env?.DOCENT_HARDWARE_CURSOR ?? "").toLowerCase());
 	let historyGeneration = 0;
 	let sessionGeneration = 0;
 	let resolveFinished;
@@ -140,14 +145,17 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	// 같은 글을 같은 너비로 다시 그리는 일이 많다(입력할 때마다, 설명 중 스피너마다). 결과를 너비별로 기억한다.
 	const markdownCache = new Map();
 	const MARKDOWN_CACHE_MAX = 400;
-	const addMarkdown = (items, text, role = "text") => {
-		const key = `${width()}\u0000${text}`;
+	const markdownLines = (text, columns = width()) => {
+		const key = `${columns}\u0000${text}`;
 		let lines = markdownCache.get(key);
 		if (lines) markdownCache.delete(key);
-		else lines = markdown.render(text, width());
+		else lines = markdown.render(text, columns);
 		markdownCache.set(key, lines);
 		if (markdownCache.size > MARKDOWN_CACHE_MAX) markdownCache.delete(markdownCache.keys().next().value);
-		for (const line of lines) items.push({ text: line, role, rich: true });
+		return lines;
+	};
+	const addMarkdown = (items, text, role = "text") => {
+		for (const line of markdownLines(text)) items.push({ text: line, role, rich: true });
 	};
 
 	function displayedHistory() {
@@ -187,41 +195,19 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			read: (place) => state.drafts.get(placeKey(place, "ask"))?.text ?? "",
 			write: (place, text) => state.drafts.set(placeKey(place, "ask"), { text, cursor: graphemes(text).length, preferredColumn: null }),
 		},
-		cards: () => state.cards.map((card) => ({ thread: card.thread, label: card.displayTitle || card.focus.label })),
+		cards: () => state.cards.map((card) => ({ thread: card.thread, label: cardTitleOf(card) })),
 		onChange: (change) => { if (state.running) applyChange(change); },
 	});
 
-	// --- Conversation choices: session whole + live cards + saved-only threads (conversations.mjs). ---
+	// --- 대화 고르기: 세션 전체 대화, 사건 카드(웹처럼 새것이 위), 카드가 목록에 없는 저장 대화 (conversations.mjs). ---
+	function answerOf(thread) { return threadRows(state.history, thread).at(-1)?.answer ?? null; }
+	/** 카드 제목은 웹처럼 답이 있으면 답에서, 없으면 질문 대상 제목이다. */
+	function cardTitleOf(card) { return cardDisplay(answerOf(card.thread), card.focus.label).title; }
 	function conversationOptions() {
-		return conversationList(state.history, state.cards).map((option) => ({
-			...option,
-			meta: option.kind === "all" ? `세션 전체 대화의 문답 ${option.count}개`
-				: option.kind === "card" ? `${option.card.past ? "이전 기록" : "새 기록"} | ${dateLabel(option.card.ts || option.card.at)}${option.count ? ` | 저장된 문답 ${option.count}개` : " | 저장된 문답 없음"}`
-				: `마지막 활동 ${dateLabel(option.lastTs)} | 저장된 문답 ${option.count}개`,
-		}));
+		const list = conversationList(state.history, state.cards);
+		return [...list.filter((o) => o.kind === "all"), ...list.filter((o) => o.kind === "card").reverse(), ...list.filter((o) => o.kind === "saved")];
 	}
-
-	// --- Body renderers. ---
-	const pick = (items, selected, label, description = "") => {
-		const prefix = selected ? theme.span("title", " → ") : "   ";
-		const columns = width();
-		const main = clipLine(label, Math.max(8, columns - 4));
-		const head = `${prefix}${theme.span(selected ? "title" : "text", main)}`;
-		const extra = description && columns > 40 && visibleWidth(main) + visibleWidth(description) + 7 <= columns
-			? theme.span("muted", `  ${description}`) : "";
-		items.push({ text: head + extra, role: "text", rich: true, selected });
-		if (description && !extra) items.push({ text: theme.span("muted", `     ${clipLine(description, columns - 6)}`), role: "text", rich: true });
-	};
-	const pickerHeader = (items, title, detail) => {
-		items.push({ text: "─".repeat(width()), role: "borderAccent" });
-		items.push({ text: `${theme.span("title", ` ${title}`)}${detail ? theme.span("muted", `  ${detail}`) : ""}`, role: "text", rich: true });
-		divider(items);
-	};
-	const pickerFooter = (items, total) => {
-		divider(items);
-		items.push({ text: theme.span("dim", ` ↑↓ 이동  Enter 선택  Esc 입력창으로${total > 8 ? `  (${total}개)` : ""}`), role: "text", rich: true });
-		items.push({ text: "─".repeat(width()), role: "borderAccent" });
-	};
+	const answerText = (answer) => (answer && typeof answer === "object" ? [answer.headline, answer.explain, ...(answer.details ?? [])].filter(Boolean).join("\n\n") : "");
 
 	/** 세션 카드: 어디(저장소, 브랜치, 워크트리)와 언제, 제목, 최근 작업 한 줄 (ADR 0045). */
 	const sessionCard = (session, selected, current) => {
@@ -246,55 +232,138 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		return lines;
 	};
 
-	function sessionsBody() {
-		const items = [];
-		pickerHeader(items, "세션 선택", "도슨트가 함께 읽을 작업 기록");
-		if (!state.sessions.length) add(items, " 세션이 없어요. 에이전트에서 대화를 시작한 뒤 Ctrl+R 로 새로고침하세요.", { role: "muted" });
-		for (let i = 0; i < state.sessions.length; i++) {
-			const session = state.sessions[i];
-			const selected = i === state.pickerIndex.sessions;
-			for (const text of sessionCard(session, selected, session.id === state.session?.id)) items.push({ text, role: "text", rich: true, selected });
-			if (i < state.sessions.length - 1) divider(items);
-		}
-		pickerFooter(items, state.sessions.length);
-		return items;
+	// --- 선택창 항목 (ADR 0068): 세션, 대화, 저장된 답변, 프로필, 설정이 같은 모양(검색창 + 목록 + 미리 보기)이다. ---
+	/** 왼쪽 글을 줄임표로 자르고 흐린 정보를 오른쪽 끝에 붙여 한 줄로 만든다. */
+	function withMeta(head, meta) {
+		const columns = width();
+		if (!meta) return truncateToWidth(head, columns, "…");
+		const metaWidth = visibleWidth(meta);
+		const left = truncateToWidth(head, Math.max(10, columns - metaWidth - 3), "…");
+		const gap = columns - visibleWidth(left) - metaWidth - 1;
+		return gap >= 1 ? `${left}${" ".repeat(gap)}${meta}` : left;
+	}
+	/** 줄이 많으면 앞쪽만 남기고 마지막 줄에 이어 읽는 방법을 적는다. */
+	function clipLines(lines, max, more) {
+		if (lines.length <= max) return lines;
+		return [...lines.slice(0, Math.max(0, max - 1)), theme.span("dim", ` … ${more}`)];
+	}
+	const MARKS = symbols === "ascii"
+		? { busy: "*", wait: "~", done: "+", star: "*" }
+		: { busy: "●", wait: "◌", done: "✓", star: "★" };
+
+	function sessionPreview(session, columns, max) {
+		const lines = [];
+		const field = (name, value) => { if (value) lines.push(`${theme.span("dim", ` ${name}  `)}${theme.span("muted", clipLine(value, columns - 16))}`); };
+		field("폴더", session.cwd);
+		field("기록", `${dateLabel(session.started)} 시작 • ${dateLabel(session.updated)} 마지막`);
+		field("SSH", session.ssh);
+		field("처음 요청", session.first);
+		field("최근 작업", session.recent);
+		return lines.slice(0, max);
 	}
 
-	function profilesBody() {
-		const items = [];
-		pickerHeader(items, "프로필 선택", "프로필마다 학습 기록과 설명 깊이가 나뉘어요");
-		state.profiles.forEach((profile, i) => {
-			pick(items, i === state.pickerIndex.profiles, `${profileName(profile)}${profile.id === "default" ? " (기본)" : ""}`, `${profile.defaultDifficulty || "NORMAL"} • ${profile.model || "기본 모델"}`);
+	function sessionItems() {
+		return state.sessions.map((session) => {
+			const current = session.id === state.session?.id;
+			return {
+				label: session.title || "제목 없음",
+				search: [session.repo, session.project, session.worktree, session.branch, session.provider, session.host, session.herdr?.label, session.recent, session.cwd, session.first].filter(Boolean).join(" "),
+				current,
+				session,
+				rows: (selected) => [...sessionCard(session, selected, current), ""],
+				previewHeight: 5,
+				preview: (columns, max) => sessionPreview(session, columns, max),
+				run: () => void switchSession(session),
+			};
 		});
-		pickerFooter(items, state.profiles.length);
-		return items;
 	}
 
-	function conversationsBody() {
-		const items = [];
-		const options = conversationOptions();
-		const savedCount = options.filter((option) => option.kind === "saved").length;
-		pickerHeader(items, "대화 선택", `카드 ${state.cards.length} • 저장 ${savedCount}`);
-		options.forEach((option, index) => {
-			const badge = option.kind === "all" ? "전체" : option.kind === "card" ? CATEGORY[option.card.sub] || "작업 내용" : "저장 대화";
-			pick(items, index === state.pickerIndex.conversations, `[${badge}] ${option.label}`, option.meta.replaceAll(" | ", " • "));
-		});
-		pickerFooter(items, options.length);
-		return items;
+	function conversationPreview(option, display, badge, columns, max) {
+		const rows = threadRows(state.history, option.thread);
+		const head = [`${theme.span("label", ` ${badge}`)} ${theme.span("title", clipLine(display.title, columns - 10))}`];
+		const foot = [];
+		if (rows.length) {
+			const last = rows.at(-1);
+			foot.push(theme.span("muted", ` 저장된 문답 ${rows.length}개 • 마지막 질문  ${clipLine(last.display || last.question || "", Math.max(10, columns - 30))}`));
+			const headline = last.answer && typeof last.answer === "object" ? last.answer.headline : "";
+			if (headline) foot.push(theme.span("muted", ` ${clipLine(headline, columns - 4)}`));
+		} else foot.push(theme.span("dim", " 이 대화에는 아직 저장된 문답이 없어요. Enter 로 열어서 질문하세요."));
+		let body;
+		if (option.focus?.text) body = markdownLines(option.focus.text, columns);
+		else if (option.kind === "all") body = rows.slice(-4).map((row) => theme.span("text", ` • ${clipLine(row.display || row.question || "", columns - 5)}`));
+		else body = [];
+		const room = Math.max(1, max - head.length - foot.length);
+		return [...head, ...clipLines(body, room, "Enter 로 전체 읽기"), ...foot];
 	}
 
-	function answersBody() {
-		const items = [];
-		const rows = displayedHistory();
-		pickerHeader(items, "저장된 답변", `${rows.length}개 • 모델을 다시 부르지 않아요`);
-		if (!rows.length) add(items, " 아직 저장된 답변이 없어요.", { role: "muted" });
-		rows.forEach((row, index) => {
-			const answer = row.answer;
-			const summary = answer && typeof answer === "object" ? answer.headline || "답변 본문 없음" : "저장된 답변 없음";
-			pick(items, index === state.pickerIndex.answers, row.display || row.question || "질문 내용을 찾을 수 없어요.", `${dateLabel(row.ts)}${row.auto ? " • 미리 설명" : ""} • ${summary}`);
+	function conversationItems() {
+		const newest = [...state.cards].reverse().find((card) => !card.past)?.thread;
+		const favorites = new Set((state.favorites ?? []).map((entry) => entry.thread));
+		const sep = theme.span("dim", " • ");
+		return conversationOptions().map((option) => {
+			const card = option.card;
+			const display = card ? cardDisplay(option.answer, option.label) : { title: option.label, summary: "" };
+			const badge = option.kind === "all" ? "전체" : card ? CATEGORY[card.sub] || "작업 내용" : "저장";
+			const auto = card?.ask ? client.autoJob(card.ask.requestId) : null;
+			const status = client.active?.thread === option.thread ? { role: "warning", text: `${MARKS.busy} 설명 중` }
+				: auto && !auto.outcome ? { role: "warning", text: `${MARKS.wait} ${auto.stage === "queued" ? "설명 대기" : "미리 설명 중"}` }
+					: option.count ? { role: "success", text: `${MARKS.done} 문답 ${option.count}` }
+						: card?.autoState === "limited" ? { role: "warning", text: "자동 설명 한도" } : null;
+			const when = card ? card.ts || card.at : option.lastTs;
+			const meta = [
+				favorites.has(option.thread) && theme.span("label", MARKS.star),
+				card && card.thread === newest && theme.span("success", "NEW"),
+				status && theme.span(status.role, status.text),
+				when && theme.span("dim", agoLabel(when)),
+			].filter(Boolean).join(sep);
+			// 답이 없는 카드는 AI 가 한 말의 앞부분(제목 줄은 빼고)이나 선택지로 고르는 데 도움을 준다.
+			const choices = Array.isArray(card?.options) ? card.options.map((entry) => entry?.label).filter(Boolean) : [];
+			const preface = card ? summarySentences(String(option.focus.text).split("\n").slice(1).join("\n"), 2) : "";
+			const summary = option.kind === "all" ? "카드에 묶이지 않은 질문과 세션 전체에 대한 설명을 이어 가요"
+				: card ? display.summary || (choices.length ? `선택지: ${choices.join(" / ")}` : preface) || "Enter 로 열어서 원문을 읽어요"
+					: `저장된 문답 ${option.count}개`;
+			const current = option.thread === state.thread;
+			return {
+				label: display.title,
+				search: `${badge} ${summary}`,
+				current,
+				option,
+				rows: (selected) => [
+					withMeta(`${selected ? theme.span("title", " → ") : current ? theme.span("success", ` ${MARKS.done} `) : "   "}${theme.span("label", `[${badge}]`)} ${theme.span(selected ? "title" : "text", clipLine(display.title, 200))}`, meta),
+					`     ${theme.span("muted", clipLine(summary, width() - 6))}`,
+					"",
+				],
+				preview: (columns, max) => conversationPreview(option, display, badge, columns, max),
+				run: () => switchThread(option),
+			};
 		});
-		pickerFooter(items, rows.length);
-		return items;
+	}
+
+	function answerItems() {
+		return displayedHistory().map((row) => {
+			const answer = row.answer && typeof row.answer === "object" ? row.answer : null;
+			return {
+				label: row.display || row.question || "질문 내용을 찾을 수 없어요.",
+				description: `${dateLabel(row.ts)}${row.auto ? " • 미리 설명" : ""} • ${answer ? answer.headline || "답변 본문 없음" : "저장된 답변 없음"}`,
+				search: answerText(answer),
+				current: isAnswerSelected(row),
+				row,
+				preview: (columns, max) => {
+					const body = answerText(answer) ? markdownLines(answerText(answer), columns) : [theme.span("muted", " 저장된 답변이 없어요.")];
+					return clipLines(body, max, "Enter 로 이 답변 위치로 가기");
+				},
+				run: () => openSelectedAnswer(row),
+			};
+		});
+	}
+
+	function profileItems() {
+		return state.profiles.map((profile) => ({
+			label: `${profileName(profile)}${profile.id === "default" ? " (기본)" : ""}`,
+			description: `${profile.defaultDifficulty || "NORMAL"} • ${profile.model || "기본 모델"}`,
+			current: profile.id === state.profile.id,
+			run: () => void chooseProfile(profile),
+		}));
 	}
 
 	function addUserMessage(items, text, steers, selected = false, meta = "") {
@@ -310,8 +379,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		divider(items);
 		addUserMessage(items, row.display || row.question || "질문 내용을 찾을 수 없어요.", row.steers, selected, meta);
 		divider(items);
-		const answer = row.answer;
-		const text = answer && typeof answer === "object" ? [answer.headline, answer.explain, ...(answer.details ?? [])].filter(Boolean).join("\n\n") : "";
+		const text = answerText(row.answer);
 		if (text) addMarkdown(items, text);
 		else add(items, " 아직 저장된 답변이 없어요.", { role: "muted" });
 	}
@@ -332,10 +400,27 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		items.push({ text: theme.span("dim", " 지금 설명이 끝나면 차례대로 보내요. /대기 로 마지막 질문을 입력창에 돌려놔요."), role: "text", rich: true });
 	}
 
+	/** 열려 있는 대화의 제목 줄: 어느 대화인지, 즐겨찾기인지, 목록으로 돌아가는 키. */
+	function threadHeading() {
+		const option = conversationOptions().find((entry) => entry.thread === state.thread);
+		const card = option?.card;
+		const badge = !state.thread ? "전체" : card ? CATEGORY[card.sub] || "작업 내용" : "저장";
+		const title = !state.thread ? "세션 전체 대화" : card ? cardDisplay(option.answer, option.label).title : state.focus?.label || option?.label || "선택한 대화";
+		const star = (state.favorites ?? []).some((entry) => entry.thread === state.thread) ? ` ${theme.span("label", MARKS.star)}` : "";
+		const hint = width() >= 70 ? "  Esc 대화 목록 • Ctrl+F 즐겨찾기" : "  Esc 목록";
+		return `${theme.span("label", ` [${badge}]`)} ${theme.span("title", clipLine(title, Math.max(10, width() - 40)))}${star}${theme.span("dim", hint)}`;
+	}
+
 	function conversationBody() {
 		const items = [];
+		if (!state.session) {
+			divider(items);
+			add(items, " 먼저 세션을 고르세요.", { role: "title" });
+			add(items, " Enter 를 누르거나 @ 를 입력하면 세션 목록이 열려요.", { role: "muted" });
+			return items;
+		}
 		const rows = displayedHistory();
-		divider(items);
+		items.push({ text: threadHeading(), role: "text", rich: true });
 		if (state.focus?.text) {
 			items.push({ text: "", role: "custom" });
 			items.push({ text: theme.span("label", " AI 출력"), role: "custom", rich: true });
@@ -346,7 +431,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		const asks = [state.settling, client.active].filter(Boolean);
 		if (!rows.length && !asks.length) {
 			add(items, " 이 작업에서 무엇이 궁금한가요?", { role: "title" });
-			add(items, " 아래에 질문을 쓰세요. # 를 입력하면 설명할 대화를, / 를 입력하면 모든 명령을 고를 수 있어요.", { role: "muted" });
+			add(items, " 아래에 질문을 쓰세요. Esc 로 다른 대화를 고르고, / 를 입력하면 모든 명령을 볼 수 있어요.", { role: "muted" });
 		}
 		for (const row of rows) addRecord(items, row, isAnswerSelected(row));
 		for (const ask of asks) addAskBlock(items, ask);
@@ -354,36 +439,32 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		return items;
 	}
 
-	function pickerBody() {
-		if (state.picker === "sessions") return sessionsBody();
-		if (state.picker === "profiles") return profilesBody();
-		if (state.picker === "conversations") return conversationsBody();
-		return answersBody();
-	}
-
 	// --- Composer: Pi editor shape. Full-width rules, padded prompt rows, no frame, corners, or labels. ---
+	// 커서 칸은 반전 칸으로 그리고, 진짜 터미널 커서도 같은 자리에 둔다(render). rows 안의 caret 은 입력 줄 기준 위치.
 	function composerFrame() {
 		const isSteer = state.purpose === "steer";
 		const draft = currentDraft();
-		const parts = graphemes(draft.text);
 		const contentWidth = Math.max(1, width() - 2);
-		const withCaret = `${parts.slice(0, draft.cursor).join("")}▏${parts.slice(draft.cursor).join("")}`;
-		const placeholder = state.picker ? "선택하면 이 입력창으로 돌아와요."
-			: isSteer ? "바로잡을 내용을 입력하세요"
-				: width() >= 70 ? "궁금한 내용을 입력하세요.  / 명령   @ 세션   # 대화   $ 설정" : "궁금한 내용을 입력하세요";
-		const wrapped = draft.text ? wrap(withCaret, contentWidth) : [`▏${placeholder}`];
+		const placeholder = isSteer ? "바로잡을 내용을 입력하세요"
+			: width() >= 70 ? "궁금한 내용을 입력하세요.  / 명령   @ 세션   # 대화   $ 설정" : "궁금한 내용을 입력하세요";
+		const { lines, caret } = layoutDraft(draft.text, draft.cursor, contentWidth);
 		const maxLines = Math.max(1, Math.min(8, height() - 8));
-		const caretLine = wrap(`${parts.slice(0, draft.cursor).join("")}▏`, contentWidth).length - 1;
-		const start = Math.max(0, Math.min(caretLine - maxLines + 1, wrapped.length - maxLines));
-		const borderRole = state.picker ? "border" : isSteer ? "warning" : "borderAccent";
+		const start = Math.max(0, Math.min(caret.line - maxLines + 1, lines.length - maxLines));
+		const borderRole = isSteer ? "warning" : "borderAccent";
 		const hidden = start > 0 ? ` ↑ ${start}줄 더 ` : "";
 		const top = hidden
 			? `${"─".repeat(Math.max(0, Math.floor((width() - visibleWidth(hidden)) / 2)))}${hidden}${"─".repeat(Math.max(0, width() - Math.floor((width() - visibleWidth(hidden)) / 2) - visibleWidth(hidden)))}`
 			: "─".repeat(width());
-		const lines = [{ text: top, role: borderRole }];
-		for (const row of wrapped.slice(start, start + maxLines)) lines.push({ text: ` ${row}`, role: draft.text ? "composer" : "dim" });
-		lines.push({ text: "─".repeat(width()), role: borderRole });
-		return lines;
+		const rows = [{ text: top, role: borderRole }];
+		if (!draft.text) rows.push({ text: ` ${withCaret(theme, [], 0)}${theme.span("dim", terminalSafeText(placeholder))}`, role: "composer", rich: true });
+		else {
+			for (let i = start; i < Math.min(lines.length, start + maxLines); i++) {
+				const parts = lines[i].map((part) => terminalSafeText(part));
+				rows.push({ text: ` ${i === caret.line ? withCaret(theme, parts, caret.index) : parts.join("")}`, role: "composer", rich: true });
+			}
+		}
+		rows.push({ text: "─".repeat(width()), role: borderRole });
+		return { rows, caret: draft.text ? { row: 1 + caret.line - start, col: 1 + caret.col } : { row: 1, col: 1 } };
 	}
 
 	const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -408,7 +489,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 
 	function headerLines() {
 		const keys = width() >= 100
-			? [["/", "명령"], ["@", "세션"], ["#", "대화"], ["$", "설정"], ["Enter", "보내기"], ["Ctrl+J", "줄바꿈"], ["Ctrl+C", "중단"]]
+			? [["/", "명령"], ["@", "세션"], ["#", "대화"], ["$", "설정"], ["Esc", "대화 목록"], ["Enter", "보내기"], ["Ctrl+J", "줄바꿈"], ["Ctrl+C", "중단"]]
 			: [["/", "명령"], ["@", "세션"], ["#", "대화"], ["$", "설정"]];
 		return [
 			`${theme.span("title", ` ${TITLE}`)}${theme.span("dim", "  설명 전용, 코드는 바꾸지 않아요")}`,
@@ -427,7 +508,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			session: state.session ? { ...state.session, title: clipLine(state.session.title || state.session.id, third), project: clipLine(placeOf(state.session) || state.session.provider || "", Math.floor(third * 0.75)) } : null,
 			conversation: clipLine(state.thread ? state.focus?.label || "선택한 대화" : "세션 전체 대화", third),
 			scroll,
-			modelName: clipLine(selector ? model?.name || selector : "기본 모델", 28),
+			modelName: clipLine(selector ? model?.name || selector : state.sessionModel?.model?.name ?? (state.session && state.sessionModel ? "omp 기본 모델" : "세션 모델"), 28),
 			depth: state.profile.defaultDifficulty || "NORMAL",
 			profileName: clipLine(profileName(state.profile), 14),
 			metrics: statusMetrics(state.history, state.thread, state.favorites),
@@ -440,25 +521,14 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		syncSpinner();
 		syncHerdr();
 		const columns = width(), rows = height();
-		const body = state.picker ? pickerBody() : conversationBody();
-		const composer = composerFrame();
+		const picker = state.picker;
+		const composer = picker ? null : composerFrame();
 		const activity = activityLine();
-		const completion = completionRows(activeCompletion());
+		const completion = picker ? [] : completionRows(activeCompletion());
 		const header = rows >= 14 ? headerLines() : headerLines().slice(0, 1);
 		const showFooter = !(completion.length && rows < 20);
-		const bodyHeight = Math.max(1, rows - header.length - (activity ? 1 : 0) - composer.length - completion.length - (showFooter ? 2 : 0));
-		const selectedLine = body.findIndex((item) => item.selected);
-		let selectedEnd = selectedLine; // 여러 줄 카드는 마지막 줄까지 보이게 한다
-		while (selectedEnd >= 0 && body[selectedEnd + 1]?.selected) selectedEnd++;
-		const maxScroll = Math.max(0, body.length - bodyHeight);
-		if (state.followBottom) state.bodyScroll = maxScroll;
-		else if (state.followSelection && selectedLine >= 0) {
-			if (selectedLine < state.bodyScroll) state.bodyScroll = selectedLine;
-			else if (selectedEnd >= state.bodyScroll + bodyHeight) state.bodyScroll = Math.min(selectedLine, selectedEnd - bodyHeight + 1);
-		}
-		state.bodyScroll = Math.max(0, Math.min(state.bodyScroll, maxScroll));
-		const visible = body.slice(state.bodyScroll, state.bodyScroll + bodyHeight);
-		while (visible.length < bodyHeight) visible.push({ text: "", role: "text" });
+		const composerRows = composer?.rows ?? [];
+		const bodyHeight = Math.max(1, rows - header.length - (activity ? 1 : 0) - composerRows.length - completion.length - (showFooter ? 2 : 0));
 		const fill = (text) => {
 			const fitted = truncateToWidth(text, columns);
 			return fitted + " ".repeat(Math.max(0, columns - visibleWidth(fitted)));
@@ -466,27 +536,51 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		const paintRow = (item) => item.rich
 			? theme.line(item.role, fill(item.text))
 			: theme.paint(item.role, fill(terminalSafeText(item.text)));
-		const scroll = body.length > bodyHeight ? `${Math.round(((state.bodyScroll + bodyHeight) / body.length) * 100)}%` : "";
+		let visible, scroll = "", caret;
+		if (picker) {
+			// 선택창은 입력창 자리까지 쓰고, 진짜 커서는 검색창 안에 둔다.
+			const view = selectorView(bodyHeight);
+			visible = view.rows;
+			caret = { row: header.length + view.caret.row, col: view.caret.col };
+		} else {
+			const body = conversationBody();
+			const selectedLine = body.findIndex((item) => item.selected);
+			let selectedEnd = selectedLine; // 여러 줄 카드는 마지막 줄까지 보이게 한다
+			while (selectedEnd >= 0 && body[selectedEnd + 1]?.selected) selectedEnd++;
+			const maxScroll = Math.max(0, body.length - bodyHeight);
+			if (state.followBottom) state.bodyScroll = maxScroll;
+			else if (state.followSelection && selectedLine >= 0) {
+				if (selectedLine < state.bodyScroll) state.bodyScroll = selectedLine;
+				else if (selectedEnd >= state.bodyScroll + bodyHeight) state.bodyScroll = Math.min(selectedLine, selectedEnd - bodyHeight + 1);
+			}
+			state.bodyScroll = Math.max(0, Math.min(state.bodyScroll, maxScroll));
+			visible = body.slice(state.bodyScroll, state.bodyScroll + bodyHeight);
+			scroll = body.length > bodyHeight ? `${Math.round(((state.bodyScroll + bodyHeight) / body.length) * 100)}%` : "";
+			caret = { row: header.length + bodyHeight + (activity ? 1 : 0) + composer.caret.row, col: composer.caret.col };
+		}
+		while (visible.length < bodyHeight) visible.push({ text: "", role: "text" });
 		const output = [
 			...header.map((line) => theme.line("text", truncateToWidth(line, columns))),
 			...visible.map(paintRow),
 			...(activity ? [theme.line("text", truncateToWidth(activity, columns))] : []),
-			...composer.map(paintRow),
+			...composerRows.map(paintRow),
 			...completion.map(paintRow),
 			...(showFooter ? footerLines(scroll).map((line) => theme.line("text", truncateToWidth(line, columns))) : []),
 		];
+		// 진짜 커서는 프레임을 쓰는 동안 숨기고 마지막에 입력 위치로 옮겨 보인다. 그래야 한글 조합 글자가 그 자리에 붙고 깜빡이지 않는다.
+		const cursor = `${ESC}${Math.min(caret.row, rows - 1) + 1};${Math.min(caret.col, columns - 1) + 1}H${ESC}?25${hardwareCursor ? "h" : "l"}`;
 		// 바뀐 줄만 다시 쓴다. 화면 크기나 줄 수가 바뀌면 전체를 다시 그린다.
 		const size = `${columns}x${rows}`;
 		if (painted.size !== size || painted.rows.length !== output.length) {
-			stdout.write(`${ESC}?2026h${ESC}2J${ESC}H${output.join("\r\n")}${ESC}?2026l`);
+			stdout.write(`${ESC}?2026h${ESC}?25l${ESC}2J${ESC}H${output.join("\r\n")}${cursor}${ESC}?2026l`);
 		} else {
 			let patch = "";
 			for (let i = 0; i < output.length; i++) {
 				if (output[i] !== painted.rows[i]) patch += `${ESC}${i + 1};1H${ESC}0m${ESC}2K${output[i]}`;
 			}
-			if (patch) stdout.write(`${ESC}?2026h${patch}${ESC}?2026l`);
+			if (patch || cursor !== painted.cursor) stdout.write(`${ESC}?2026h${ESC}?25l${patch}${cursor}${ESC}?2026l`);
 		}
-		painted = { size, rows: output };
+		painted = { size, rows: output, cursor };
 	}
 
 	/** 입력 직후 바로 그리고, 설명 스트림이나 스피너처럼 잦은 갱신은 한 프레임(16ms)에 한 번으로 묶는다. */
@@ -496,71 +590,149 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		renderTimer = setTimeout(() => { renderTimer = null; lastRenderAt = performance.now(); render(); }, wait);
 	}
 
-	// --- Pickers: open/close/choose. Esc and picking never touch the keyed drafts. ---
-	function togglePicker(kind) {
-		if (state.picker === kind) { closePicker(); return; }
+	// --- 선택창 (ADR 0068): 열기, 거르기, 고르기, 닫기. 고르거나 닫아도 입력창 초안은 건드리지 않는다. ---
+	const PICKERS = {
+		sessions: { title: "세션 선택", placeholder: "제목, 저장소, 브랜치, 폴더로 찾기", empty: "맞는 세션이 없어요. 글자를 지우거나 Ctrl+R 로 목록을 새로 불러오세요.", keys: "Enter 열기  Ctrl+R 새로고침" },
+		conversations: { title: "대화 선택", placeholder: "제목, 요약으로 찾기", empty: "맞는 대화가 없어요. 글자를 지워 보세요.", keys: "Enter 열기  Ctrl+F 즐겨찾기" },
+		answers: { title: "저장된 답변", placeholder: "질문, 답으로 찾기", empty: "이 대화에는 맞는 저장된 답변이 없어요.", keys: "Enter 이 답변으로" },
+		profiles: { title: "프로필 선택", placeholder: "프로필 이름으로 찾기", empty: "맞는 프로필이 없어요.", keys: "Enter 선택" },
+		settings: { title: "설정", placeholder: "깊이, 모델, 미리 설명, 프로필로 찾기", empty: "맞는 설정이 없어요. 글자를 지워 보세요.", keys: "Enter 바꾸기" },
+		modelScope: { title: "모델 범위", placeholder: "제공자, 모델 이름으로 찾기", empty: "맞는 모델이 없어요. 글자를 지워 보세요.", keys: "Enter 담기·빼기, 맨 위 항목으로 저장" },
+	};
+
+	function pickerItems(kind) {
+		if (kind === "sessions") return sessionItems();
+		if (kind === "conversations") return conversationItems();
+		if (kind === "answers") return answerItems();
+		if (kind === "profiles") return profileItems();
+		if (kind === "modelScope") return modelScopeItems();
+		return settingsItems();
+	}
+
+	function pickerDetail(kind) {
+		if (kind === "sessions") return `도슨트가 함께 읽을 작업 기록 • ${state.sessions.length}개`;
+		if (kind === "conversations") return `카드 ${state.cards.length} • 저장 ${conversationOptions().filter((option) => option.kind === "saved").length}`;
+		if (kind === "answers") return "모델을 다시 부르지 않아요";
+		if (kind === "profiles") return "프로필마다 학습 기록과 설명 깊이가 나뉘어요";
+		if (kind === "modelScope") return `고른 ${state.scopeDraft.size}개 • Esc 로 저장하지 않고 닫기`;
+		if (state.models?.loading) return "모델 목록을 불러오는 중이에요";
+		return state.models?.error ? `모델 목록을 불러오지 못했어요: ${state.models.error}` : `프로필 ${profileName(state.profile)}`;
+	}
+
+	const visibleItems = () => filterItems(pickerItems(state.picker.kind), state.picker.query.text);
+
+	/** 열 때와 새 카드가 올 때 고를 항목. 현재 세션, 지금 폴더의 세션, 설명 중이거나 가장 새 카드, 지금 쓰는 값 순이다. */
+	function defaultIndex(picker, items) {
+		const found = (test) => Math.max(0, items.findIndex(test));
+		if (picker.kind === "sessions") {
+			const current = items.findIndex((item) => item.current);
+			if (current >= 0) return current;
+			const here = process.cwd().replaceAll("\\", "/");
+			return found((item) => {
+				const folder = String(item.session.cwd ?? "").replaceAll("\\", "/");
+				return folder && (here === folder || here.startsWith(`${folder}/`));
+			});
+		}
+		if (picker.kind === "conversations") {
+			if (!picker.auto) return found((item) => item.current);
+			if (client.active) {
+				const busy = items.findIndex((item) => item.option.thread === client.active.thread);
+				if (busy >= 0) return busy;
+			}
+			return found((item) => item.option.kind === "card");
+		}
+		if (picker.kind === "answers") {
+			const current = items.findIndex((item) => item.current);
+			return current >= 0 ? current : Math.max(0, items.length - 1);
+		}
+		if (picker.kind === "modelScope") return 0;
+		return found((item) => item.current);
+	}
+
+	function selectorView(lines) {
+		const picker = state.picker, spec = PICKERS[picker.kind];
+		const all = pickerItems(picker.kind);
+		const items = filterItems(all, picker.query.text);
+		if (!picker.touched) picker.index = defaultIndex(picker, items);
+		picker.index = Math.max(0, Math.min(picker.index, items.length - 1));
+		const narrow = width() < 72;
+		const view = renderSelector({
+			theme, width: width(), lines, title: spec.title, detail: pickerDetail(picker.kind), query: picker.query, placeholder: spec.placeholder,
+			items, total: all.length, index: picker.index, start: picker.start,
+			hint: narrow ? "↑↓ 이동  Enter 선택  Esc 닫기" : `↑↓ 이동  PgUp/PgDn 쪽  ${spec.keys}  Esc 닫기`,
+			empty: spec.empty,
+		});
+		picker.start = view.start;
+		picker.page = view.visible;
+		return view;
+	}
+
+	function openPicker(kind, { auto = false } = {}) {
 		if ((kind === "conversations" || kind === "answers") && !state.session) {
-			inform("먼저 세션을 고르세요. @ 를 입력하면 세션 목록이 나와요.");
-			return;
+			inform("먼저 세션을 고르세요.");
+			kind = "sessions";
 		}
-		state.picker = kind;
-		if (kind === "sessions") {
-			const current = state.sessions.findIndex((entry) => entry.id === state.session?.id);
-			state.pickerIndex.sessions = current >= 0 ? current : 0;
-		} else if (kind === "profiles") {
-			const current = state.profiles.findIndex((entry) => entry.id === state.profile.id);
-			state.pickerIndex.profiles = Math.max(0, current);
-		} else if (kind === "conversations") {
-			const current = conversationOptions().findIndex((option) => option.thread === state.thread);
-			state.pickerIndex.conversations = Math.max(0, current);
-		} else if (kind === "answers") {
-			const rows = displayedHistory();
-			const current = rows.findIndex((row) => isAnswerSelected(row));
-			state.pickerIndex.answers = current >= 0 ? current : Math.max(0, rows.length - 1);
-		}
-		state.bodyScroll = 0;
-		state.followSelection = true;
-		state.followBottom = false;
+		if (kind === "settings" || kind === "modelScope") loadModels();
+		if (kind === "modelScope") state.scopeDraft = new Set(state.profile.modelScope ?? []);
+		state.picker = { kind, query: { text: "", cursor: 0 }, index: 0, start: 0, page: 5, touched: false, auto };
 		scheduleRender();
+	}
+
+	function togglePicker(kind) {
+		if (state.picker?.kind === kind) closePicker();
+		else openPicker(kind);
 	}
 
 	function closePicker() {
 		state.picker = null;
 		state.bodyScroll = 0;
-		state.followSelection = true;
-		state.followBottom = false;
-		scheduleRender();
-	}
-
-	function pickerCount() {
-		if (state.picker === "sessions") return state.sessions.length;
-		if (state.picker === "profiles") return state.profiles.length;
-		if (state.picker === "conversations") return conversationOptions().length;
-		if (state.picker === "answers") return displayedHistory().length;
-		return 0;
-	}
-
-	function focusPicker(index) {
-		const count = pickerCount();
-		if (!count) return;
-		state.pickerIndex[state.picker] = Math.max(0, Math.min(index, count - 1));
-		state.bodyScroll = 0;
-		state.followSelection = true;
-		state.followBottom = false;
 		scheduleRender();
 	}
 
 	function movePicker(delta) {
-		const count = pickerCount();
+		const picker = state.picker, count = visibleItems().length;
 		if (!count) return;
-		focusPicker((state.pickerIndex[state.picker] + delta + count) % count);
+		picker.touched = true;
+		const next = picker.index + delta;
+		picker.index = Math.abs(delta) === 1 ? (next + count) % count : Math.max(0, Math.min(next, count - 1)); // 한 칸씩은 끝에서 반대편으로, 쪽 단위는 끝에서 멈춘다
+		scheduleRender();
 	}
 
 	function choosePicker() {
-		if (state.picker === "sessions") { void switchSession(state.sessions[state.pickerIndex.sessions]); return; }
-		if (state.picker === "profiles") { void chooseProfile(state.profiles[state.pickerIndex.profiles]); return; }
-		if (state.picker === "conversations") { switchThread(conversationOptions()[state.pickerIndex.conversations]); return; }
-		if (state.picker === "answers") openSelectedAnswer();
+		const items = visibleItems();
+		const item = items[Math.min(state.picker.index, items.length - 1)];
+		if (!item) { failNotice("선택할 항목이 없어요."); return; }
+		if (!item.keepOpen) state.picker = null;
+		item.run();
+		scheduleRender();
+	}
+
+	/** 선택창이 열려 있을 때의 키. 처리했으면 true. 글자와 붙여넣기는 검색창으로, 나머지는 이동과 선택이다. */
+	function pickerKey(event) {
+		const picker = state.picker;
+		if (event.type === "key") {
+			switch (event.key) {
+				case "up": movePicker(-1); return true;
+				case "down": movePicker(1); return true;
+				case "pageup": movePicker(-Math.max(1, picker.page - 1)); return true;
+				case "pagedown": movePicker(Math.max(1, picker.page - 1)); return true;
+				case "enter": case "tab": choosePicker(); return true;
+				case "escape":
+					if (picker.query.text) { picker.query = { text: "", cursor: 0 }; picker.touched = false; picker.start = 0; scheduleRender(); }
+					else closePicker();
+					return true;
+				case "ctrl-f": {
+					const item = visibleItems()[picker.index];
+					if (item?.option) void toggleFavorite(item.option.thread, item.option.focus);
+					return true;
+				}
+			}
+		}
+		const before = picker.query.text;
+		if (!editLine(picker.query, event)) return false;
+		if (picker.query.text !== before) { picker.index = 0; picker.start = 0; picker.touched = Boolean(picker.query.text); }
+		scheduleRender();
+		return true;
 	}
 
 	function switchThread(option) {
@@ -576,9 +748,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	}
 
 	/** Saved answers are a read view: select the original record inside its thread. No request is sent. */
-	function openSelectedAnswer() {
-		const rows = displayedHistory();
-		const row = rows[state.pickerIndex.answers];
+	function openSelectedAnswer(row) {
 		if (!row) { inform("선택할 저장된 답변이 없어요."); return; }
 		state.selectedAnswer = { ts: row.ts, question: row.question ?? "" };
 		state.picker = null;
@@ -588,9 +758,29 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		scheduleRender();
 	}
 
-	// --- Inline completion (OMP style): "/" commands, "@" sessions, "#" conversations, "$" settings. ---
-	// Active only while the whole question draft is one trigger plus a filter; Esc keeps the text literal.
+	/** 즐겨찾기 켜고 끄기(웹과 같은 /api/favorites). 먼저 화면에 반영하고 저장이 실패하면 되돌린다. */
+	async function toggleFavorite(thread, focus) {
+		if (!state.session) { inform("먼저 세션을 고르세요."); return; }
+		const sessionId = state.session.id, profileId = selectedProfileId(state.profile);
+		const before = state.favorites;
+		if (!Array.isArray(before)) { failNotice("즐겨찾기 목록을 아직 불러오지 못했어요."); return; }
+		const on = !before.some((entry) => entry.thread === thread);
+		state.favorites = on ? [...before, { thread }] : before.filter((entry) => entry.thread !== thread);
+		scheduleRender();
+		try {
+			await api.setFavorite(sessionId, profileId, on, focus ? { label: String(focus.label ?? "").slice(0, 200), text: excerpt(focus.text) } : null);
+			if (state.running && state.session?.id === sessionId) await loadFavorites(sessionId, profileId, historyGeneration);
+			succeed(on ? "즐겨찾기에 넣었어요." : "즐겨찾기에서 뺐어요.");
+		} catch (error) {
+			if (state.session?.id === sessionId) state.favorites = before;
+			failNotice(`즐겨찾기를 저장하지 못했어요: ${reason(error)}`);
+		}
+	}
+
+	// --- 명령 목록 (OMP 처럼 입력창 바로 아래): 입력창 전체가 "/" 와 거르기 글자일 때만 열린다. Esc 는 글자를 그대로 둔다. ---
+	// @ # $ 를 입력창 첫 글자로 치면 글자는 질문에 넣지 않고 세션, 대화, 설정 선택창이 열린다 (ADR 0068).
 	const DEPTHS = [["EASY", "짧고 쉬운 핵심과 예시"], ["NORMAL", "원리와 흐름까지"], ["HARD", "실제 코드, 경계 조건, 대안까지"]];
+	const TRIGGER_PICKERS = { "@": "sessions", "#": "conversations", "$": "settings" };
 
 	function setDraftText(text) {
 		const draft = currentDraft();
@@ -604,7 +794,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	function needSession() {
 		if (state.session) return true;
 		inform("먼저 세션을 고르세요.");
-		setDraftText("@");
+		openPicker("sessions");
 		return false;
 	}
 
@@ -612,10 +802,11 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	const command = (ko, en, aliases, description, run) => ({ label: `/${ko} (${en})`, names: [ko, en], aliases, description, run });
 	function commandItems() {
 		const items = [
-			command("세션", "session", "", "함께 읽을 작업 세션 고르기", () => setDraftText("@")),
-			command("대화", "thread", "conversation card", "세션 전체 대화나 사건 카드 고르기", () => { if (needSession()) setDraftText("#"); }),
-			command("답변", "answers", "history", "이 대화에서 저장된 답변 다시 보기", () => { if (needSession()) togglePicker("answers"); }),
-			command("설정", "settings", "config model depth profile", "설명 깊이, 모델, 미리 설명, 프로필", () => setDraftText("$")),
+			command("세션", "session", "", "함께 읽을 작업 세션 고르기", () => openPicker("sessions")),
+			command("대화", "thread", "conversation card", "세션 전체 대화나 사건 카드 고르기", () => { if (needSession()) openPicker("conversations"); }),
+			command("답변", "answers", "history", "이 대화에서 저장된 답변 다시 보기", () => { if (needSession()) openPicker("answers"); }),
+			command("즐겨찾기", "favorite", "star bookmark", "지금 보는 대화를 즐겨찾기에 넣거나 빼기", () => { if (needSession()) void toggleFavorite(state.thread, state.focus); }),
+			command("설정", "settings", "config model depth profile", "설명 깊이, 모델, 미리 설명, 프로필", () => openPicker("settings")),
 			command("새로고침", "refresh", "reload", "목록과 대화를 다시 불러오고 끊긴 설명에 다시 연결", rejoinOrRefresh),
 		];
 		if (client.active) items.push(
@@ -627,25 +818,20 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		return items;
 	}
 
-	function sessionItems() {
-		return state.sessions.map((session) => ({
-			label: session.title || "제목 없음",
-			aliases: `${session.repo ?? ""} ${session.project ?? ""} ${session.worktree ?? ""} ${session.branch ?? ""} ${session.provider ?? ""} ${session.host ?? ""} ${session.herdr?.label ?? ""}`,
-			description: session.recent ?? "",
-			card: (selected) => sessionCard(session, selected, session.id === state.session?.id),
-			current: session.id === state.session?.id,
-			run: () => void switchSession(session),
-		}));
+	/** 모델을 고르지 않았을 때 설명에 쓰이는 이 세션의 모델 한 줄. */
+	function sessionModelText() {
+		if (!state.session) return "세션을 고르면 그 세션의 모델로 설명해요";
+		if (!state.sessionModel) return "이 세션의 모델을 확인하는 중이에요";
+		const { raw, model } = state.sessionModel;
+		if (model) return `이 세션은 ${model.name} (${model.selector})`;
+		return raw ? `${raw} 는 omp 카탈로그에 없어 omp 기본 모델로 설명해요` : "기록에 모델이 없어 omp 기본 모델로 설명해요";
 	}
 
-	function conversationItems() {
-		if (!state.session) return [];
-		return conversationOptions().map((option) => ({
-			label: `${option.kind === "all" ? "[전체]" : option.kind === "card" ? `[${CATEGORY[option.card.sub] || "작업 내용"}]` : "[저장 대화]"} ${option.label}`,
-			description: option.meta.replaceAll(" | ", " • "),
-			current: option.thread === state.thread,
-			run: () => switchThread(option),
-		}));
+	async function loadSessionModel(sessionId, generation) {
+		try {
+			const info = await api.sessionModel(sessionId);
+			if (state.running && generation === sessionGeneration) { state.sessionModel = info; scheduleRender(); }
+		} catch { /* 표시만 못 한다. 설명 모델은 서버가 같은 규칙으로 정한다. */ }
 	}
 
 	function loadModels() {
@@ -668,31 +854,41 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		} catch (error) { failNotice(`설정을 바꾸지 못했어요: ${reason(error)}`); }
 	}
 
+	/** 설정 선택창 항목. 깊이, 미리 설명, 모델은 고른 뒤에도 창이 남아 이어서 바꿀 수 있다. */
 	function settingsItems() {
 		loadModels();
 		const profile = state.profile;
 		const items = DEPTHS.map(([depth, description]) => ({
-			label: `설명 깊이 ${depth}`, aliases: "depth difficulty 난이도", description,
-			current: (profile.defaultDifficulty || "NORMAL") === depth,
+			tag: "깊이", label: depth, search: "depth difficulty 난이도 설명 깊이", description,
+			current: (profile.defaultDifficulty || "NORMAL") === depth, keepOpen: true,
 			run: () => void patchProfile({ defaultDifficulty: depth }, `기본 설명 깊이를 ${depth}로 바꿨어요.`),
 		}));
 		const auto = profile.autoExplain !== false;
 		items.push({
-			label: auto ? "미리 설명 끄기" : "미리 설명 켜기", aliases: "auto prefetch 자동",
+			tag: "미리 설명", label: auto ? "끄기" : "켜기", search: "auto prefetch 자동",
 			description: auto ? "지금 켜져 있어요. 새 사건 카드를 미리 설명하지 않아요" : "지금 꺼져 있어요. 새 사건 카드를 쉬운 말로 미리 설명해요",
+			keepOpen: true,
 			run: () => void patchProfile({ autoExplain: !auto }, auto ? "미리 설명을 껐어요." : "미리 설명을 켰어요."),
 		});
-		items.push({ label: "모델: 기본 모델", aliases: "model 모델", description: "omp 기본 모델로 설명", current: !profile.model, run: () => void patchProfile({ model: null }, "기본 모델로 설명해요.") });
+		items.push({ tag: "모델", label: "세션 모델 (기본)", search: "model 모델 기본 default session", description: sessionModelText(), current: !profile.model, keepOpen: true, run: () => void patchProfile({ model: null }, "세션의 모델로 설명해요.") });
+		const scope = profile.modelScope?.length ? new Set(profile.modelScope) : null;
 		for (const model of state.models.list) {
+			if (scope && !scope.has(model.selector) && profile.model !== model.selector) continue; // 범위 밖 모델은 숨기되 지금 고른 모델은 둔다
 			items.push({
-				label: `모델: ${model.name || model.selector}`, aliases: `model 모델 ${model.provider ?? ""}`, description: model.selector,
-				current: profile.model === model.selector,
+				tag: "모델", label: model.name || model.selector, search: `model 모델 ${model.provider ?? ""}`, description: model.selector,
+				current: profile.model === model.selector, keepOpen: true,
 				run: () => void patchProfile({ model: model.selector }, `${model.name || model.selector} 모델로 설명해요.`),
 			});
 		}
+		items.push({
+			tag: "모델 범위", label: scope ? `범위 고치기 (${scope.size}개)` : "범위 정하기", search: "model scope 모델 범위 후보",
+			description: scope ? "목록에 둘 모델을 다시 고릅니다" : "지금은 모든 모델이 보여요. 쓸 모델만 골라 목록을 줄입니다",
+			run: () => openPicker("modelScope"),
+		});
+		if (scope) items.push({ tag: "모델 범위", label: "범위 해제", search: "model scope 모델 범위 전체", description: "모든 모델이 목록에 보여요", keepOpen: true, run: () => void patchProfile({ modelScope: null }, "모델 범위를 해제했어요.") });
 		for (const entry of state.profiles) {
 			items.push({
-				label: `프로필: ${profileName(entry)}`, aliases: "profile 프로필",
+				tag: "프로필", label: profileName(entry), search: "profile 프로필",
 				description: entry.id === "default" ? "기본 프로필" : "학습 기록을 따로 보관해요",
 				current: entry.id === state.profile.id,
 				run: () => void chooseProfile(entry),
@@ -701,32 +897,46 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		return items;
 	}
 
+	/** 모델 범위 선택창 항목: 맨 위 저장 항목(검색해도 남음)과 모델별 체크. Enter 로 담고 뺀다. */
+	function modelScopeItems() {
+		loadModels();
+		const draft = state.scopeDraft;
+		const items = [{
+			tag: "저장", label: `범위 저장 (${draft.size}개)`, pinned: true, search: "save 저장",
+			description: draft.size ? "모델 선택 목록에 고른 모델만 보여요" : "고른 모델이 없으면 범위가 풀려 모든 모델이 보여요",
+			run: () => void patchProfile({ modelScope: [...draft] }, draft.size ? `모델 범위를 ${draft.size}개로 정했어요.` : "모델 범위를 해제했어요."),
+		}];
+		for (const model of state.models.list) {
+			items.push({
+				tag: model.provider, label: model.name || model.selector, search: model.selector, description: model.selector,
+				current: draft.has(model.selector), keepOpen: true,
+				run: () => { if (draft.has(model.selector)) draft.delete(model.selector); else draft.add(model.selector); },
+			});
+		}
+		return items;
+	}
+
 	function activeCompletion() {
 		if (state.picker || state.purpose === "steer") return null;
 		const draft = currentDraft();
-		const match = /^([/@#$])([^\n]*)$/.exec(draft.text);
+		const match = /^\/([^\n]*)$/.exec(draft.text);
 		if (!match || state.completion.dismissed === draft.text) return null;
-		const [, trigger, raw] = match;
-		const terms = raw.toLowerCase().split(/\s+/).filter(Boolean);
-		const all = trigger === "/" ? commandItems() : trigger === "@" ? sessionItems() : trigger === "#" ? conversationItems() : settingsItems();
-		let items = all.filter((item) => {
+		const terms = match[1].toLowerCase().split(/\s+/).filter(Boolean);
+		let items = commandItems().filter((item) => {
 			const haystack = `${item.label} ${item.aliases ?? ""} ${item.description ?? ""}`.toLowerCase();
 			return terms.every((term) => haystack.includes(term));
 		});
-		// 명령은 이름이 입력한 글자로 시작하는 것을 먼저 둔다. "/s" 는 설명에 s 가 든 명령보다 session, settings, stop 이 앞선다.
-		if (trigger === "/" && terms.length) {
+		// 이름이 입력한 글자로 시작하는 명령을 먼저 둔다. "/s" 는 설명에 s 가 든 명령보다 session, settings, stop 이 앞선다.
+		if (terms.length) {
 			const starts = (item) => item.names.some((name) => name.toLowerCase().startsWith(terms[0]));
 			items = [...items.filter(starts), ...items.filter((item) => !starts(item))];
 		}
 		if (state.completion.key !== draft.text) {
 			state.completion.key = draft.text;
-			state.completion.index = terms.length ? 0 : Math.max(0, items.findIndex((item) => item.current));
+			state.completion.index = 0;
 		}
 		state.completion.index = Math.max(0, Math.min(state.completion.index, items.length - 1));
-		const empty = trigger === "#" && !state.session ? "먼저 세션을 고르세요. @ 를 입력하면 세션 목록이 나와요."
-			: trigger === "$" && state.models?.loading && !terms.length ? "" : "일치하는 항목이 없어요. Esc를 누르면 입력한 글자를 그대로 보낼 수 있어요.";
-		const title = { "/": "명령", "@": "세션", "#": "대화", "$": "설정" }[trigger];
-		return { trigger, title, items, empty, loading: trigger === "$" && Boolean(state.models?.loading), modelError: trigger === "$" ? state.models?.error : "" };
+		return { items, empty: "일치하는 명령이 없어요. Esc를 누르면 입력한 글자를 그대로 보낼 수 있어요." };
 	}
 
 	function moveCompletion(completion, delta) {
@@ -738,7 +948,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 
 	function acceptCompletion(completion) {
 		const item = completion.items[state.completion.index];
-		if (!item) { failNotice(completion.empty || "일치하는 항목이 없어요."); return; }
+		if (!item) { failNotice(completion.empty); return; }
 		clearDraft();
 		state.completion = { key: "", index: 0, dismissed: null };
 		inform("");
@@ -746,33 +956,24 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		scheduleRender();
 	}
 
-	/** Pi SelectList rows under the editor: "→" marks the keyboard choice, descriptions stay muted. Session items draw as cards. */
+	/** Pi SelectList rows under the editor: "→" marks the keyboard choice, descriptions stay muted. */
 	function completionRows(completion) {
 		if (!completion) return [];
 		const rows = [];
 		const total = completion.items.length;
-		const linesPerItem = completion.items.some((item) => item.card) ? 3 : 1;
-		const max = Math.max(2, Math.min(8, Math.floor((height() - 14) / linesPerItem)));
+		const max = Math.max(2, Math.min(8, height() - 14));
 		const index = state.completion.index;
 		const start = Math.max(0, Math.min(index - Math.floor(max / 2), total - max));
 		const visible = completion.items.slice(start, start + max);
 		const labelWidth = Math.min(Math.floor(width() * 0.45), Math.max(8, ...visible.map((item) => visibleWidth(item.label))));
-		rows.push(`${theme.span("title", ` ${completion.trigger} ${completion.title}`)}${theme.span("dim", "  ↑↓ 이동  Enter 선택  Esc 글자 그대로 입력")}`);
-		if (completion.loading) rows.push(theme.span("dim", "   모델 목록을 불러오는 중이에요"));
-		if (completion.modelError) rows.push(theme.span("warning", `   모델 목록을 불러오지 못했어요: ${completion.modelError}`));
-		if (!total && completion.empty) rows.push(theme.span("dim", `   ${completion.empty}`));
+		rows.push(`${theme.span("title", " / 명령")}${theme.span("dim", "  ↑↓ 이동  Enter 실행  Esc 글자 그대로 입력")}`);
+		if (!total) rows.push(theme.span("dim", `   ${completion.empty}`));
 		visible.forEach((item, offset) => {
 			const selected = start + offset === index;
-			if (item.card) {
-				const lines = item.card(selected);
-				rows.push(...lines, ...Array(Math.max(0, linesPerItem - lines.length)).fill("")); // 고를 때 입력창이 들썩이지 않게 높이를 맞춘다
-				return;
-			}
 			const label = clipLine(item.label, labelWidth);
 			const padded = label + " ".repeat(Math.max(0, labelWidth - visibleWidth(label)));
-			const mark = item.current ? theme.span("success", " ✓") : "  ";
 			const room = width() - labelWidth - 8;
-			rows.push(`${selected ? theme.span("title", " → ") : "   "}${theme.span(selected ? "title" : "text", padded)}${mark} ${room > 6 && item.description ? theme.span("muted", clipLine(item.description, room)) : ""}`);
+			rows.push(`${selected ? theme.span("title", " → ") : "   "}${theme.span(selected ? "title" : "text", padded)}   ${room > 6 && item.description ? theme.span("muted", clipLine(item.description, room)) : ""}`);
 		});
 		if (total > max) rows.push(theme.span("dim", `   (${index + 1}/${total})`));
 		return rows.map((text) => ({ text, role: "text", rich: true }));
@@ -790,7 +991,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			if (!state.running || generation !== historyGeneration) return;
 			state.history = Array.isArray(rows) ? rows : [];
 			if (state.selectedAnswer && !state.history.some((row) => isAnswerSelected(row))) state.selectedAnswer = null;
-			state.pickerIndex.answers = Math.min(state.pickerIndex.answers, Math.max(0, displayedHistory().length - 1));
+			if (state.picker?.kind === "answers") state.picker.start = 0;
 			scheduleRender();
 		} catch (error) {
 			if (generation === historyGeneration) failNotice(`이전 대화를 불러오지 못했어요: ${reason(error)}`);
@@ -809,16 +1010,18 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 
 	/** 서버가 질문 대상과 스레드를 붙인 사건 카드만 받는다. 클라이언트는 스레드를 계산하지 않는다. */
 	function addCard(event) {
-		if (!event || !["question", "assistant"].includes(event.kind) || !CATEGORY[event.sub] || typeof event.text !== "string" || !event.text.trim()) return;
-		if (typeof event.thread !== "string" || !event.thread || typeof event.focus?.text !== "string" || !event.focus.text.trim()) return;
+		if (!event || !["question", "assistant"].includes(event.kind) || !CATEGORY[event.sub] || typeof event.text !== "string" || !event.text.trim()) return null;
+		if (typeof event.thread !== "string" || !event.thread || typeof event.focus?.text !== "string" || !event.focus.text.trim()) return null;
 		const thread = event.thread, key = thread;
-		if (state.cardKeys.has(key)) return;
+		if (state.cardKeys.has(key)) return null;
 		state.cardKeys.add(key);
-		state.cards.push({ ...event, focus: { label: event.focus.label || CATEGORY[event.sub], text: event.focus.text }, thread, key });
+		const card = { ...event, focus: { label: event.focus.label || CATEGORY[event.sub], text: event.focus.text }, thread, key };
+		state.cards.push(card);
 		if (state.cards.length > 200) {
 			const removed = state.cards.shift();
 			state.cardKeys.delete(removed.key);
 		}
+		return card;
 	}
 
 	function handleEvent(event) {
@@ -832,9 +1035,13 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			void reloadHistory();
 			return;
 		}
-		const before = state.cards.length;
-		addCard(event);
-		if (state.cards.length !== before) scheduleRender();
+		const card = addCard(event);
+		if (!card) return;
+		// 서버가 미리 설명을 붙인 새 카드는 같은 requestId 로 작업에 붙어 진행 상태와 끝을 안다(웹과 같다).
+		if (card.ask && !state.history.some((row) => row.thread === card.thread)) {
+			client.attachAuto({ requestId: card.ask.requestId, question: card.ask.question, display: card.ask.display ?? null, difficulty: card.ask.difficulty ?? "EASY", focus: card.focus, thread: card.thread });
+		}
+		scheduleRender();
 	}
 
 	/** session-client 의 변화를 화면에 옮긴다. 미리 설명과 다른 화면이 보낸 질문은 그리지 않는다(답은 record 사건으로 다시 불러온다). */
@@ -854,7 +1061,8 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			else inform(back.trim());
 			return;
 		}
-		if (change.job?.auto || change.job?.detached) return;
+		if (change.job?.auto) { if (state.picker?.kind === "conversations") scheduleRender(); return; }
+		if (change.job?.detached) return;
 		if (change.error) failNotice(`설명 요청에 실패했어요: ${change.error} 서버의 요청은 계속될 수 있어요. Ctrl+R 키로 같은 요청에 다시 연결하세요.`);
 		if (change.type === "job" && !change.event) {
 			state.followSelection = false;
@@ -864,7 +1072,12 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	}
 
 	async function finishAsk(job, outcome) {
-		if (!job.auto && !job.detached) {
+		if (job.auto) {
+			if (outcome.type === "answer") await reloadHistory();
+			scheduleRender();
+			return;
+		}
+		if (!job.detached) {
 			if (outcome.type === "answer") {
 				// 저장된 대화를 다시 불러올 때까지 받은 설명을 그대로 보여 준다. 그 사이 다음 대기 질문이 시작될 수 있다.
 				state.settling = job;
@@ -901,13 +1114,12 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			const list = await api.sessions();
 			if (!state.running || !Array.isArray(list)) return;
 			state.sessions = list;
-			const current = list.findIndex((entry) => entry.id === state.session?.id);
-			state.pickerIndex.sessions = current >= 0 ? current : Math.min(state.pickerIndex.sessions, Math.max(0, list.length - 1));
 			inform(`세션 목록을 새로 불러왔어요. ${list.length}개`);
 		} catch (error) { failNotice(`세션 목록을 불러오지 못했어요: ${reason(error)}`); }
 	}
 
-	async function switchSession(session) {
+	/** 세션을 연다. 고른 직후에는 대화 선택창이 이어서 열린다(`pick`). 프로필만 바꿀 때는 같은 세션 전체 대화에 머문다. */
+	async function switchSession(session, { pick = true } = {}) {
 		if (!session) { inform("선택할 세션이 없어요."); return; }
 		state.session = session;
 		state.cards = [];
@@ -927,7 +1139,10 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		const generation = ++sessionGeneration;
 		// 이전 세션의 설명 스트림은 놓는다(서버 작업은 계속). 돌아오면 rejoin 으로 다시 붙는다.
 		client.open({ profileId: selectedProfileId(state.profile), sessionId: session.id });
-		state.picker = null;
+		state.sessionModel = null;
+		void loadSessionModel(session.id, generation);
+		if (pick) openPicker("conversations", { auto: true });
+		else state.picker = null;
 		state.bodyScroll = 0;
 		state.followSelection = false;
 		state.followBottom = true;
@@ -959,15 +1174,10 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		state.cardKeys.clear();
 		state.selectedAnswer = null;
 		inform(`프로필을 ${profileName(profile)} 으로 바꿨어요.`);
-		if (state.session) await switchSession(state.session);
+		if (state.session) await switchSession(state.session, { pick: false });
 		else {
 			client.close();
-			state.picker = "sessions";
-			state.pickerIndex.sessions = 0;
-			state.bodyScroll = 0;
-			state.followSelection = true;
-			state.followBottom = false;
-			scheduleRender();
+			openPicker("sessions");
 		}
 	}
 
@@ -1104,7 +1314,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			inform("");
 			return;
 		}
-		if (state.picker === "sessions" || !state.session) { void refreshSessions(); return; }
+		if (state.picker?.kind === "sessions" || !state.session) { void refreshSessions(); return; }
 		void reloadHistory();
 		inform("대화 기록을 새로 불러오는 중이에요.");
 	}
@@ -1156,12 +1366,20 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 
 	function key(event) {
 		if (!state.running) return;
+		// 선택창이 열려 있으면 글자와 붙여넣기는 검색창으로 간다.
+		if (state.picker && (event.type === "text" || event.type === "paste")) { pickerKey(event); return; }
 		if (event.type === "paste") {
 			if (event.tooLarge) { failNotice(`붙여넣은 내용이 너무 커요. ${draftLimit()}자 이내로 나눠서 붙여넣으세요.`); return; }
 			insertText(event.text, true);
 			return;
 		}
-		if (event.type === "text") { insertText(event.text); return; }
+		if (event.type === "text") {
+			// @ # $ 를 입력창 첫 글자로 치면 세션, 대화, 설정 선택창이 열린다. 질문이 이 기호로 시작하면 앞에 공백을 하나 두세요.
+			const kind = TRIGGER_PICKERS[event.text];
+			if (kind && state.purpose !== "steer" && !currentDraft().text) { openPicker(kind); return; }
+			insertText(event.text);
+			return;
+		}
 
 		switch (event.key) {
 			case "ctrl-p": togglePicker("sessions"); return;
@@ -1172,24 +1390,23 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			case "ctrl-s": toggleSteer(); return;
 			case "interrupt": void cancelActiveAsk(); return;
 			case "eof": exit(); return;
+			case "ctrl-f":
+				if (state.picker) pickerKey(event);
+				else if (state.session) void toggleFavorite(state.thread, state.focus);
+				else inform("먼저 세션을 고르세요.");
+				return;
 			case "escape": {
+				if (state.picker) { pickerKey(event); return; }
 				const completion = activeCompletion();
 				if (completion) { state.completion.dismissed = currentDraft().text; scheduleRender(); }
-				else if (state.picker) closePicker();
-				else { state.notice = ""; scheduleRender(); }
+				else if (state.purpose === "steer") { state.purpose = "ask"; scheduleRender(); }
+				else { state.notice = ""; openPicker(state.session ? "conversations" : "sessions"); } // 대화 안에서 Esc 는 대화 목록으로 돌아간다
 				return;
 			}
 		}
 
-		if (state.picker) {
-			if (event.key === "up") { movePicker(-1); return; }
-			if (event.key === "down") { movePicker(1); return; }
-			if (event.key === "home") { focusPicker(0); return; }
-			if (event.key === "end") { focusPicker(pickerCount() - 1); return; }
-			if (event.key === "enter" || event.key === "tab") { choosePicker(); return; }
-			if (event.key === "left") { scroll(-1); return; }
-			if (event.key === "right") { scroll(1); return; }
-		} else {
+		if (state.picker) { pickerKey(event); return; }
+		{
 			const draft = currentDraft();
 			const completion = activeCompletion();
 			if (completion) {
@@ -1261,7 +1478,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			// docent herdr / OMP /docent: 지정한 세션을 바로 연다. 최근 200개 밖이어도 id 로 열 수 있다.
 			const listed = state.sessions.find((entry) => entry.id === initialSession);
 			void switchSession(listed ?? { id: initialSession, provider: initialSession.split(":")[0], title: "지정한 세션" });
-		}
+		} else openPicker("sessions");
 		render();
 		await finished;
 	} finally {

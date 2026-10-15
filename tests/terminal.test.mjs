@@ -3,23 +3,26 @@ import test from "node:test";
 import { TerminalInput, terminalSafeText } from "../app/terminal-input.mjs";
 import { PassThrough, Writable } from "node:stream";
 import { agoLabel, runTerminal } from "../app/terminal-ui.mjs";
-import { fixture, until } from "./omp-fixture.mjs";
+import { fixture, secondModel, until } from "./omp-fixture.mjs";
 import { createServer, request } from "node:http";
 import { once } from "node:events";
 import { stripVTControlCharacters } from "node:util";
 import { createTerminalTheme } from "../app/terminal-theme.mjs";
 import { answerFocus } from "../app/conversations.mjs";
 
-async function terminal(t, baseUrl) {
+/** stage: "thread"(기본) 세션과 대화를 고르고 대화 화면까지, "conversations" 세션만 고르고 대화 선택창에서 멈춤, "sessions" 세션 선택창에서 멈춤. */
+async function terminal(t, baseUrl, { stage = "thread" } = {}) {
 	const stdin = new PassThrough();
 	stdin.isTTY = true;
 	stdin.setRawMode = (value) => { stdin.isRaw = value; };
-	let screen = "", frames = 0, closed = false, grid = [], patchedRows = null;
-	// 화면 전체를 그리는 프레임과 바뀐 줄만 고치는 프레임을 모두 반영한 가상 화면.
+	let screen = "", frames = 0, closed = false, grid = [], patchedRows = null, cursor = null;
+	// 화면 전체를 그리는 프레임과 바뀐 줄만 고치는 프레임을 모두 반영한 가상 화면. 진짜 커서 위치(1부터)와 보임도 따라간다.
 	const stdout = new Writable({ write(chunk, _encoding, done) {
 		const text = String(chunk);
 		if (text.includes("\u001b[?2026h")) {
-			const body = text.replace(/\u001b\[\?2026[hl]/g, "");
+			const place = [...text.matchAll(/\u001b\[(\d+);(\d+)H\u001b\[\?25([lh])\u001b\[\?2026l$/g)].at(-1);
+			if (place) cursor = { row: Number(place[1]), col: Number(place[2]), visible: place[3] === "h" };
+			const body = text.replace(/\u001b\[\?(?:2026|25)[hl]/g, "").replace(/\u001b\[\d+;\d+H$/, "");
 			if (body.startsWith("\u001b[2J\u001b[H")) { grid = body.slice(7).split("\r\n"); patchedRows = null; }
 			else {
 				const parts = body.split(/\u001b\[(\d+);1H\u001b\[0m\u001b\[2K/);
@@ -36,6 +39,8 @@ async function terminal(t, baseUrl) {
 	finished.catch(() => {});
 	const ui = {
 		get screen() { return screen; },
+		/** 진짜 터미널 커서의 마지막 위치({row, col, visible}, 1부터). */
+		get cursor() { return cursor; },
 		/** 마지막 프레임이 고친 줄 수. 전체를 다시 그렸으면 null. */
 		get patchedRows() { return patchedRows; },
 		send: (keys) => stdin.write(keys),
@@ -51,7 +56,12 @@ async function terminal(t, baseUrl) {
 		},
 	};
 	t.after(() => ui.close());
+	// 세션을 고르면 대화 선택창이 이어서 열린다. 대화는 기본 항목(카드가 없으면 세션 전체 대화)으로 연다.
 	await until(() => screen.includes("세션 선택"));
+	if (stage === "sessions") return ui;
+	await ui.key("\r");
+	await until(() => screen.includes("대화 선택"));
+	if (stage === "conversations") return ui;
 	await ui.key("\r");
 	return ui;
 }
@@ -189,16 +199,19 @@ test("a disconnected explanation rejoins the same request, and a question typed 
 	}
 });
 
-test("typing a letter rewrites only the changed rows, not the whole screen", async (t) => {
+test("typing a letter rewrites only the changed rows, and the real cursor follows the caret", async (t) => {
 	const f = await fixture(t);
 	const ui = await terminal(t, f.address);
+	const lineAt = () => ui.screen.split(/\r?\n/)[ui.cursor.row - 1];
 	await ui.key("가");
 	assert.ok(ui.patchedRows !== null && ui.patchedRows <= 2, `expected a partial update, got ${ui.patchedRows} rows`);
-	assert.match(ui.screen, /가▏/);
+	assert.ok(ui.cursor.visible, "the cursor must stay visible so the IME can attach its composition to it");
+	assert.match(lineAt(), /^ 가/);
+	assert.equal(ui.cursor.col, 4, "caret after a one-space pad and a double-width Hangul syllable");
 	await ui.key("\u007f");
 	assert.ok(ui.patchedRows !== null && ui.patchedRows <= 2);
-	assert.doesNotMatch(ui.screen, /가▏/);
-	assert.match(ui.screen, /▏궁금한 내용을 입력하세요/);
+	assert.equal(ui.cursor.col, 2);
+	assert.match(lineAt(), /궁금한 내용을 입력하세요/);
 });
 
 test("composer letters remain literal and picker cancellation preserves the draft and caret", async (t) => {
@@ -300,15 +313,20 @@ test("switching profiles restores each composer's draft without sending it under
 	assert.equal((await f.api(`/api/history?profileId=${other.id}`)).body[0].question, "다른 프로필의 초안");
 });
 
-test("the composer keeps the editing caret visible through soft wraps and resize", async (t) => {
+test("the real cursor stays on the editing point through soft wraps and resize", async (t) => {
 	const f = await fixture(t);
 	const ui = await terminal(t, f.address);
+	const lineAt = () => ui.screen.split(/\r?\n/)[ui.cursor.row - 1];
 	await ui.key("한".repeat(500));
-	assert.ok(ui.screen.includes("▏"), "soft-wrapped text must scroll with its caret");
+	assert.match(lineAt(), /^ 한+▏?\s*$/, "soft-wrapped text must scroll with its caret");
+	assert.equal(ui.cursor.col, 2 + 2 * (500 % 41), "82 columns hold 41 syllables per row");
 	await ui.resize(40, 16);
-	assert.ok(ui.screen.includes("▏"), "the editing point must remain visible after narrowing the terminal");
+	assert.ok(ui.cursor.row <= 16, "the cursor must stay inside the narrowed terminal");
+	assert.match(lineAt(), /^ 한+▏?\s*$/);
+	assert.equal(ui.cursor.col, 2 + 2 * (500 % 19), "38 columns hold 19 syllables per row");
 	await ui.key("\u0001");
-	assert.ok(ui.screen.includes("▏"), "moving to the start must reveal that caret position");
+	assert.match(lineAt(), /^ ▏?한+/);
+	assert.equal(ui.cursor.col, 2, "moving to the start puts the cursor on the first syllable");
 });
 
 test("the whole-session conversation's answer picker excludes answers from card threads", async (t) => {
@@ -365,7 +383,7 @@ test("trigger menus switch conversation and settings in place, and never send th
 	await ui.key("/대");
 	assert.ok(ui.screen.includes("/대화"), ui.screen);
 	await ui.key("\r");
-	await until(() => ui.screen.includes("# 대화") && ui.screen.includes("카드 대화"));
+	await until(() => ui.screen.includes("대화 선택") && ui.screen.includes("카드 대화"));
 	await ui.key("카드");
 	await ui.key("\r");
 	ui.send("카드에 이어 묻기\r");
@@ -391,14 +409,19 @@ test("commands show Korean and English names and either name runs the command", 
 	await ui.finished;
 });
 
-test("an unmatched trigger is not sent until Esc turns it into literal question text", async (t) => {
+test("a leading @ # $ opens its selector instead of entering the draft, and a leading space keeps it literal", async (t) => {
 	const f = await fixture(t);
 	const ui = await terminal(t, f.address);
 	await ui.key("#1 오류가 뭐야");
-	assert.ok(ui.screen.includes("일치하는 항목이 없어요"), ui.screen);
+	assert.ok(ui.screen.includes("대화 선택") && ui.screen.includes("맞는 대화가 없어요"), ui.screen);
+	assert.equal(ui.cursor.row, 5, "while a selector is open the cursor sits in its search field");
 	await ui.key("\r");
 	assert.deepEqual((await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body, []);
 	await ui.key("\u001b");
+	assert.ok(ui.screen.includes("대화 선택"), "the first Esc only clears the search");
+	await ui.key("\u001b");
+	assert.equal(ui.screen.includes("대화 선택"), false, "the second Esc closes the selector");
+	await ui.key(" #1 오류가 뭐야");
 	ui.send("\r");
 	await until(async () => (await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body.length === 1);
 	assert.equal((await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body[0].question, "#1 오류가 뭐야");
@@ -427,7 +450,123 @@ test("the @ session picker shows the Herdr workspace name on the session card", 
 	const ui = await terminal(t, `http://127.0.0.1:${proxy.address().port}`);
 	await ui.key("@");
 	assert.match(ui.screen, /워드프레스 리팩터링/, ui.screen);
-	await ui.key("\u0015");
+	await ui.key("\u001b");
 	await ui.key("@워드");
 	assert.match(ui.screen, /워드프레스 리팩터링/, "the workspace name is searchable");
+});
+
+const askEvent = (id, question, timestamp) => ({
+	type: "assistant", uuid: id, timestamp,
+	message: { role: "assistant", content: [{ type: "tool_use", id: `tool-${id}`, name: "AskUserQuestion", input: { questions: [{ question, options: [{ label: "Supabase Realtime", description: "이미 보유" }] }] } }] },
+});
+
+test("picking a session opens the conversation selector on the newest card, previews its AI output, and Enter reads it", async (t) => {
+	const f = await fixture(t);
+	await f.appendSession(askEvent("a1", "첫 번째로 물어본 질문", "2026-01-01T00:02:00Z"));
+	await f.appendSession(askEvent("a2", "두 번째로 물어본 질문", "2026-01-01T00:03:00Z"));
+	const ui = await terminal(t, f.address, { stage: "conversations" });
+	await until(() => ui.screen.includes("두 번째로 물어본 질문") && ui.screen.includes("첫 번째로 물어본 질문"));
+	const lines = ui.screen.split(/\r?\n/);
+	const at = (text) => lines.findIndex((line) => line.includes(text));
+	assert.ok(at("세션 전체 대화") < at("두 번째로 물어본 질문") && at("두 번째로 물어본 질문") < at("첫 번째로 물어본 질문"), "the whole conversation first, then cards newest first");
+	assert.ok(lines[at("두 번째로 물어본 질문")].includes("→"), "the newest card is preselected, not the whole-session conversation");
+	assert.ok(ui.screen.includes("Supabase Realtime"), "the highlighted card's AI output is previewed below the list");
+	await ui.key("\u001b[B");
+	assert.ok(ui.screen.split(/\r?\n/).find((line) => line.includes("→"))?.includes("첫 번째로 물어본 질문"));
+	await ui.key("\r");
+	assert.equal(ui.screen.includes("대화 선택"), false);
+	assert.ok(ui.screen.includes("AI 출력") && ui.screen.includes("Supabase Realtime"), "the opened card shows its AI output as the first message");
+	assert.ok(ui.screen.includes("Esc 대화 목록"));
+	await ui.key("\u001b");
+	assert.ok(ui.screen.includes("대화 선택"), "Esc in a conversation returns to the list");
+	assert.ok(ui.screen.split(/\r?\n/).find((line) => line.includes("→"))?.includes("첫 번째로 물어본 질문"), "the open conversation stays selected");
+});
+
+test("a selector searches Hangul, pages by screen, and keeps the real cursor in its search field", async (t) => {
+	const f = await fixture(t);
+	const proxy = createServer((req, res) => {
+		const upstream = request(new URL(req.url, f.address), { method: req.method, headers: req.headers }, (response) => {
+			if (req.url !== "/api/sessions") { res.writeHead(response.statusCode, response.headers); response.pipe(res); return; }
+			let body = "";
+			response.on("data", (chunk) => { body += chunk; });
+			response.on("end", () => {
+				const [first] = JSON.parse(body);
+				const list = Array.from({ length: 30 }, (_, i) => ({ ...first, id: i ? `${first.id}#${i}` : first.id, title: i === 12 ? "한글 검색 대상 세션" : `세션 ${String(i + 1).padStart(2, "0")}` }));
+				res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify(list));
+			});
+		});
+		upstream.on("error", () => res.destroy());
+		req.pipe(upstream);
+	});
+	proxy.listen(0, "127.0.0.1");
+	await once(proxy, "listening");
+	t.after(() => proxy.close());
+	const ui = await terminal(t, `http://127.0.0.1:${proxy.address().port}`, { stage: "sessions" });
+	const counter = () => ui.screen.match(/(\d+)\/(\d+)(?: \(전체 \d+\))?\s*$/m);
+	assert.deepEqual(counter().slice(1, 3), ["1", "30"]);
+	await ui.key("\u001b[6~");
+	const paged = Number(counter()[1]);
+	assert.ok(paged > 2 && paged < 30, `PageDown moves by a screen, got ${paged}`);
+	await ui.key("\u001b[5~");
+	assert.equal(counter()[1], "1", "PageUp comes back");
+	await ui.key("\u001b[A");
+	assert.equal(counter()[1], "30", "Up from the first item wraps to the last");
+	await ui.key("대상");
+	assert.match(ui.screen, /1\/1 \(전체 30\)/);
+	assert.ok(ui.screen.includes("한글 검색 대상 세션"));
+	assert.equal(ui.screen.includes("세션 05"), false);
+	assert.equal(ui.cursor.row, 5);
+	assert.equal(ui.cursor.col, 1 + 6 + 4, "after the 6-column ` 검색 ` label and two double-width syllables (1-based)");
+	await ui.key("\u007f\u007f");
+	assert.equal(ui.cursor.col, 7, "Backspace removes whole syllables");
+	await ui.key("\u001b[B");
+	await ui.key("\r");
+	await until(() => ui.screen.includes("대화 선택"));
+});
+
+test("choosing a setting keeps the selector open and moves the check mark", async (t) => {
+	const f = await fixture(t);
+	const ui = await terminal(t, f.address);
+	await ui.key("$hard");
+	await ui.key("\r");
+	await until(() => ui.screen.split(/\r?\n/).some((line) => line.includes("HARD") && line.includes("✓")));
+	assert.ok(ui.screen.includes("설정"), "the settings selector stays open for the next change");
+	assert.equal((await f.api("/api/profiles")).body.find((profile) => profile.id === "default").defaultDifficulty, "HARD");
+});
+
+test("Esc in a conversation opens the list with the current conversation selected", async (t) => {
+	const f = await fixture(t);
+	const ui = await terminal(t, f.address);
+	await ui.key("\u001b");
+	assert.ok(ui.screen.includes("대화 선택"));
+	assert.ok(ui.screen.split(/\r?\n/).find((line) => line.includes("→"))?.includes("세션 전체 대화"));
+	await ui.key("\u001b");
+	assert.equal(ui.screen.includes("대화 선택"), false);
+});
+
+test("the settings selector defaults to the session's model, and a model scope narrows the model list", async (t) => {
+	const f = await fixture(t);
+	await f.appendSession({ type: "assistant", uuid: "m1", timestamp: "2026-01-01T00:01:00Z", message: { role: "assistant", model: "other", content: [{ type: "text", text: "작업했어요." }] } });
+	const ui = await terminal(t, f.address);
+	await until(() => ui.screen.split(/\r?\n/).slice(-2).join("\n").includes("Other"));
+	await ui.key("$");
+	await until(() => ui.screen.includes("Cheap") && ui.screen.includes("Other"));
+	const defaultRow = ui.screen.split(/\r?\n/).find((line) => line.includes("세션 모델 (기본)"));
+	assert.ok(defaultRow?.includes("✓") || defaultRow?.includes("+"), "the session model is the checked default");
+	await ui.key("범위");
+	assert.ok(ui.screen.includes("범위 정하기"));
+	await ui.key("\r");
+	assert.ok(ui.screen.includes("모델 범위") && ui.screen.includes("범위 저장 (0개)"), ui.screen);
+	await ui.key("\u001b[B");
+	await ui.key("\u001b[B");
+	await ui.key("\r");
+	assert.ok(ui.screen.includes("범위 저장 (1개)"));
+	await ui.key("\u001b[A");
+	await ui.key("\u001b[A");
+	await ui.key("\r");
+	await until(async () => ((await f.api("/api/profiles")).body[0].modelScope ?? []).length === 1);
+	assert.deepEqual((await f.api("/api/profiles")).body[0].modelScope, [secondModel]);
+	await ui.key("$cheap");
+	assert.ok(ui.screen.includes("맞는 설정이 없어요"), "a model outside the scope is hidden from the settings list");
 });
