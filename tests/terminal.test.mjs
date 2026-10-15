@@ -436,7 +436,7 @@ test("a leading @ # $ opens its selector instead of entering the draft, and a le
 	const ui = await terminal(t, f.address);
 	await ui.key("#1 오류가 뭐야");
 	assert.ok(ui.screen.includes("대화 선택") && ui.screen.includes("맞는 대화가 없어요"), ui.screen);
-	assert.equal(ui.cursor.row, 5, "while a selector is open the cursor sits in its search field");
+	assert.equal(ui.cursor.row, 7, "while a selector is open the cursor sits in its search field, below the 4-row boxed header");
 	await ui.key("\r");
 	assert.deepEqual((await f.api(`/api/history?id=${encodeURIComponent(f.sessionId)}`)).body, []);
 	await ui.key("\u001b");
@@ -526,19 +526,19 @@ test("a selector searches Hangul, pages by screen, and keeps the real cursor in 
 	t.after(() => proxy.close());
 	const ui = await terminal(t, `http://127.0.0.1:${proxy.address().port}`, { stage: "sessions" });
 	const counter = () => ui.screen.match(/(\d+)\/(\d+)(?: \(전체 \d+\))?\s*$/m);
-	assert.deepEqual(counter().slice(1, 3), ["1", "30"]);
+	assert.deepEqual(counter().slice(1, 3), ["1", "31"]);
 	await ui.key("\u001b[6~");
 	const paged = Number(counter()[1]);
 	assert.ok(paged > 2 && paged < 30, `PageDown moves by a screen, got ${paged}`);
 	await ui.key("\u001b[5~");
 	assert.equal(counter()[1], "1", "PageUp comes back");
 	await ui.key("\u001b[A");
-	assert.equal(counter()[1], "30", "Up from the first item wraps to the last");
+	assert.equal(counter()[1], "31", "Up from the first item wraps to the last");
 	await ui.key("대상");
-	assert.match(ui.screen, /1\/1 \(전체 30\)/);
+	assert.match(ui.screen, /1\/1 \(전체 31\)/);
 	assert.ok(ui.screen.includes("한글 검색 대상 세션"));
 	assert.equal(ui.screen.includes("세션 05"), false);
-	assert.equal(ui.cursor.row, 5);
+	assert.equal(ui.cursor.row, 6, "3-row boxed header while no session is open");
 	assert.equal(ui.cursor.col, 1 + 6 + 4, "after the 6-column ` 검색 ` label and two double-width syllables (1-based)");
 	await ui.key("\u007f\u007f");
 	assert.equal(ui.cursor.col, 7, "Backspace removes whole syllables");
@@ -593,6 +593,38 @@ test("the settings selector defaults to the session's model, and a model scope n
 	assert.ok(ui.screen.includes("맞는 설정이 없어요"), "a model outside the scope is hidden from the settings list");
 });
 
+test("sessions idle for over three days are kept out of the list, shown by the last row, and still found by search", async (t) => {
+	const f = await fixture(t);
+	const proxy = createServer((req, res) => {
+		const upstream = request(new URL(req.url, f.address), { method: req.method, headers: req.headers }, (response) => {
+			if (req.url !== "/api/sessions") { res.writeHead(response.statusCode, response.headers); response.pipe(res); return; }
+			let body = "";
+			response.on("data", (chunk) => { body += chunk; });
+			response.on("end", () => {
+				const [first] = JSON.parse(body);
+				const old = { ...first, id: `${first.id}#old`, title: "오래전에 끝난 작업", updated: new Date(Date.now() - 10 * 86_400_000).toISOString() };
+				res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify([{ ...first, title: "방금 한 작업" }, old]));
+			});
+		});
+		upstream.on("error", () => res.destroy());
+		req.pipe(upstream);
+	});
+	proxy.listen(0, "127.0.0.1");
+	await once(proxy, "listening");
+	t.after(() => proxy.close());
+	const ui = await terminal(t, `http://127.0.0.1:${proxy.address().port}`, { stage: "sessions" });
+	assert.ok(ui.screen.includes("방금 한 작업"));
+	assert.equal(ui.screen.includes("오래전에 끝난 작업"), false, "the old session is not in the active list");
+	assert.match(ui.screen, /종료된 세션 보기 \(1개\)/);
+	await ui.key("오래전");
+	assert.ok(ui.screen.includes("오래전에 끝난 작업"), "search reaches ended sessions");
+	await ui.key("\u0015");
+	await ui.key("\u001b[A");
+	await ui.key("\r");
+	await until(() => ui.screen.includes("오래전에 끝난 작업") && ui.screen.includes("진행 중인 세션으로 돌아가기"));
+	assert.equal(ui.screen.includes("방금 한 작업"), false, "the ended view lists only ended sessions");
+});
 /** 목록 응답을 30개 세션으로 부풀리는 중계. 첫 세션만 진짜다. */
 async function manySessions(t, f) {
 	const proxy = createServer((req, res) => {
@@ -633,7 +665,7 @@ test("mouse reporting is switched on at start, and /마우스 turns it off and o
 test("in a selector the wheel moves the choice one item per notch without wrapping, and a click chooses the item under the pointer", async (t) => {
 	const f = await fixture(t);
 	const ui = await terminal(t, await manySessions(t, f), { stage: "sessions" });
-	const counter = () => ui.screen.match(/(\d+)\/30\s*$/m)?.[1];
+	const counter = () => ui.screen.match(/(\d+)\/31\s*$/m)?.[1];
 	assert.equal(counter(), "1");
 	ui.mouse("wheel-down", 10, 10);
 	await until(() => counter() === "2");

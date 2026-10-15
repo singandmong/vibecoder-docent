@@ -127,6 +127,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		completion: { key: "", index: 0, dismissed: null }, models: null, favorites: null, wiki: null, evidence: null, panel: null,
 		sessionModel: null, // 이 세션의 모델 {raw, model}. 모델을 고르지 않았을 때(기본) 설명에 쓰인다 (ADR 0069)
 		scopeDraft: new Set(), // 모델 범위 선택창에서 고르는 중인 모델
+		endedView: false, // 세션 선택창이 종료된 세션을 보이는 중인지
 	};
 	let renderTimer = null;
 	const FRAME_MS = 16;
@@ -286,8 +287,25 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		return lines.slice(0, max);
 	}
 
+	/** 이만큼 지난 세션은 "종료된 세션"으로 따로 본다. Herdr 에 열려 있거나 지금 보는 세션은 늘 진행 중으로 친다. */
+	const ENDED_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
+	const isEnded = (session) => {
+		if (session.id === state.session?.id || session.herdr) return false;
+		const time = Date.parse(session.updated ?? "");
+		return Number.isFinite(time) && Date.now() - time > ENDED_AFTER_MS;
+	};
+
 	function sessionItems() {
-		return state.sessions.map((session) => {
+		const searching = Boolean(state.picker?.kind === "sessions" && state.picker.query.text);
+		const ended = state.sessions.filter(isEnded);
+		const shown = searching ? state.sessions : state.sessions.filter((session) => state.endedView === isEnded(session));
+		const toggle = {
+			tag: state.endedView ? "진행 중" : "종료됨", keepOpen: true, search: "ended finished 종료 지난 진행",
+			label: state.endedView ? "진행 중인 세션으로 돌아가기" : `종료된 세션 보기 (${ended.length}개)`,
+			description: state.endedView ? "최근 3일 안에 움직였거나 Herdr 에 열려 있는 세션" : "3일 넘게 움직임이 없는 세션. 검색하면 여기서도 찾아요",
+			run: () => { state.endedView = !state.endedView; if (state.picker) Object.assign(state.picker, { index: 0, start: 0, touched: false }); },
+		};
+		return [...shown.map((session) => {
 			const current = session.id === state.session?.id;
 			return {
 				label: session.title || "제목 없음",
@@ -299,7 +317,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 				preview: (columns, max) => sessionPreview(session, columns, max),
 				run: () => void switchSession(session),
 			};
-		});
+		}), toggle];
 	}
 
 	function conversationPreview(option, display, badge, columns, max) {
@@ -696,14 +714,33 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		return "";
 	}
 
+	/** 맨 위 고정 영역: 테두리 상자 안에 제목, 단축키, 열려 있는 세션 요약(OMP recap 처럼 한 줄). 낮은 화면에서는 줄여 간다. */
 	function headerLines() {
-		const keys = width() >= 100
+		const columns = width();
+		const keys = columns >= 100
 			? [["/", "명령"], ["@", "세션"], ["#", "대화"], ["$", "설정"], ["Esc", "대화 목록"], ["Enter", "보내기"], ["Ctrl+J", "줄바꿈"], ["Ctrl+C", "중단"]]
 			: [["/", "명령"], ["@", "세션"], ["#", "대화"], ["$", "설정"]];
-		return [
-			`${theme.span("title", ` ${TITLE}`)}${mouse.copied ? theme.span("success", `  ${mouse.copied}`) : theme.span("dim", "  설명 전용, 코드는 바꾸지 않아요")}`,
-			` ${keys.map(([key, label]) => `${theme.span("title", key)} ${theme.span("muted", label)}`).join(theme.span("dim", " • "))}`,
-		];
+		const note = mouse.copied ? theme.span("success", mouse.copied) : theme.span("dim", "설명 전용, 코드는 바꾸지 않아요");
+		const title = `${theme.span("title", TITLE)}  ${note}`;
+		if (height() < 14) return [` ${title}`];
+		const ascii = symbols === "ascii";
+		const c = ascii ? { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" } : { tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", v: "│" };
+		const edge = (text) => theme.span("borderAccent", text);
+		const inner = Math.max(1, columns - 4);
+		const row = (content) => {
+			const fitted = truncateToWidth(content, inner);
+			return `${edge(c.v)} ${fitted}${" ".repeat(Math.max(0, inner - visibleWidth(fitted)))} ${edge(c.v)}`;
+		};
+		const head = truncateToWidth(` ${title} `, Math.max(1, columns - 2));
+		const top = `${edge(c.tl)}${head}${edge(c.h.repeat(Math.max(0, columns - 2 - visibleWidth(head))))}${edge(c.tr)}`;
+		const lines = [top, row(keys.map(([key, label]) => `${theme.span("title", key)} ${theme.span("muted", label)}`).join(theme.span("dim", "  "))) ];
+		if (height() >= 20 && state.session) {
+			const session = state.session;
+			const where = [placeOf(session), session.branch].filter(Boolean).join(" ");
+			lines.push(row(`${theme.span("label", where || session.provider || "세션")} ${theme.span("text", clipLine(session.title || session.id, Math.max(8, inner - visibleWidth(where) - 2)))}`));
+		}
+		lines.push(`${edge(c.bl)}${edge(c.h.repeat(Math.max(0, columns - 2)))}${edge(c.br)}`);
+		return lines;
 	}
 
 	/** Status line: two rows built from STATUS_RULES (docs/terminal-status-line.md, ADR 0040). */
@@ -830,7 +867,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	}
 
 	function pickerDetail(kind) {
-		if (kind === "sessions") return `도슨트가 함께 읽을 작업 기록 • ${state.sessions.length}개`;
+		if (kind === "sessions") return state.endedView ? "종료된 세션: 3일 넘게 움직임 없음" : `진행 중인 세션 ${state.sessions.filter((s) => !isEnded(s)).length}개 • 오래된 세션은 맨 위 항목으로 따로 봐요`;
 		if (kind === "conversations") return `카드 ${state.cards.length} • 저장 ${conversationOptions().filter((option) => option.kind === "saved").length}`;
 		if (kind === "answers") return "모델을 다시 부르지 않아요";
 		if (kind === "evidence") return `인용 ${evidenceItems().length}개, 원문은 선택해서 확인`;
@@ -851,7 +888,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			if (current >= 0) return current;
 			const here = process.cwd().replaceAll("\\", "/");
 			return found((item) => {
-				const folder = String(item.session.cwd ?? "").replaceAll("\\", "/");
+				const folder = String(item.session?.cwd ?? "").replaceAll("\\", "/");
 				return folder && (here === folder || here.startsWith(`${folder}/`));
 			});
 		}
