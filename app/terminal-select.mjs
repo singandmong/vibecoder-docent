@@ -99,7 +99,7 @@ export function defaultRows(theme, item, selected, { width, column }) {
  * @param {number} view.start 목록의 첫 항목(직전 값)
  * @param {string} view.hint 도움말 한 줄
  * @param {string} view.empty 항목이 없을 때 안내
- * @returns {{rows: {text: string, role: string, rich: boolean}[], start: number, visible: number, caret: {row: number, col: number}}} visible 은 목록에 통째로 보인 항목 수, caret 은 검색창 안 커서 위치(줄은 rows 기준, 칸은 0부터)
+ * @returns {{rows: {text: string, role: string, rich: boolean}[], start: number, visible: number, hits: {index: number, top: number, height: number}[], caret: {row: number, col: number}}} visible 은 목록에 통째로 보인 항목 수, hits 는 보이는 항목마다 rows 기준 시작 줄과 높이(마우스 누름 판정), caret 은 검색창 안 커서 위치(줄은 rows 기준, 칸은 0부터)
  */
 export function renderSelector(view) {
 	const { theme, width, lines, title, detail, query, placeholder, items, total, index, hint, empty } = view;
@@ -145,11 +145,14 @@ export function renderSelector(view) {
 	if (gap) rows.push(rich(""));
 
 	const list = [];
+	const hits = [];
 	let visible = 0;
 	if (!items.length) list.push(rich(theme.span("muted", ` ${terminalSafeText(empty)}`)));
 	for (let i = start; i < items.length && list.length < listLines; i++) {
 		const built = rowsOf(i);
+		const before = list.length;
 		for (const text of built) if (list.length < listLines) list.push(rich(text));
+		hits.push({ index: i, top: rows.length + before, height: list.length - before });
 		if (list.length <= listLines && built.length) visible++;
 	}
 	while (list.length < listLines) list.push(rich(""));
@@ -169,5 +172,5 @@ export function renderSelector(view) {
 		? `${theme.span("dim", left)}${" ".repeat(gapWidth)}${theme.span("muted", count)}`
 		: theme.span("dim", truncateToWidth(`${left}  ${count}`, width, "…"))));
 	rows.push(rule);
-	return { rows: rows.slice(0, lines), start, visible: Math.max(1, visible), caret: { row: searchRow, col: caretCol } };
+	return { rows: rows.slice(0, lines), start, visible: Math.max(1, visible), hits, caret: { row: searchRow, col: caretCol } };
 }

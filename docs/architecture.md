@@ -39,6 +39,7 @@ app/terminal-ui.mjs       터미널 클라이언트 화면: 대화, 입력창(�
 app/session-model.mjs     설명 대상 세션의 모델: 정규화 전사의 마지막 `(모델: X)` 표식, omp 카탈로그(60초 캐시)와 맞춰 정확한 모델 하나로. 프로필에 고른 모델이 없을 때의 설명·분류 모델 (ADR 0069)
 app/terminal-select.mjs   터미널 선택창의 상태 없는 부분: 낱말 거르기, 줄 수가 다른 항목의 스크롤 시작점, 한 화면 그리기(검색창, 목록, 미리 보기, 도움말), 입력 위치 커서 칸 (ADR 0068)
 app/terminal-status.mjs   터미널 상태줄 규칙 표와 그리기, 좁은 화면 항목 빼기 (ADR 0040)
+app/terminal-mouse.mjs    터미널 마우스 글자 선택의 상태 없는 부분: 칸 기준 선택 범위, 복사할 글, 반전 줄, 낱말 범위, 칸 → 글자 순번. SGR 마우스 해석은 terminal-input.mjs 의 `decodeMouse` (ADR 0070)
 app/terminal-markdown.mjs Pi Markdown 렌더러 연결과 제어 문자 차단. 한글 옆 강조는 `app/assets/terminal-cjk.js`(웹과 같은 remark + `@streamdown/cjk` 파서를 `app/terminal-cjk-src.mjs` 에서 미리 묶은 것)가 강조 구간을 찾아 CommonMark 가 거절할 구분 기호 바깥에 U+FEFF 를 끼우고 렌더 뒤 지움 (ADR 0038·0061·0065)
 app/markdown-remark.mjs   웹 Markdown 의 remark 플러그인 순서. `@streamdown/cjk` 로 한글 옆 강조와 취소선을 풂. 빌드 입력이라 배포 패키지에서 빠짐 (ADR 0061)
 app/terminal-theme.mjs    OMP titanium 역할별 색 (ADR 0038)

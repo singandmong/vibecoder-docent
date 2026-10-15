@@ -63,30 +63,31 @@ export function wrapTerminalText(value, width) {
  * 입력창 글을 `columns` 칸으로 접고(글자는 쪼개지 않음), 커서(글자 단위 위치)가 놓인 줄·글자 순번·칸을 돌려준다.
  * 커서는 글자 위이거나 글 끝의 빈 칸이다. 줄 끝에 놓인 커서 칸은 `columns` 칸 바로 다음(여유 한 칸)까지 갈 수 있다.
  * 탭은 네 칸 공백으로 보인다. 줄바꿈 글자는 줄 사이로만 쓰이고 줄 안에는 남지 않는다.
- * @returns {{lines: string[][], caret: {line: number, index: number, col: number}}} lines 는 줄마다 글자 배열
+ * @returns {{lines: string[][], starts: number[], caret: {line: number, index: number, col: number}}} lines 는 줄마다 글자 배열, starts 는 줄마다 첫 글자의 원문 글자 순번
  */
 export function layoutDraft(text, cursor, columns) {
 	const limit = Math.max(1, Math.floor(columns));
 	const parts = graphemes(text);
 	const at = Math.max(0, Math.min(Math.floor(cursor) || 0, parts.length));
-	const lines = [[]];
+	const lines = [[]], starts = [0];
 	let used = 0, caret = null;
 	for (let i = 0; i <= parts.length; i++) {
 		const part = parts[i];
 		if (part === "\n") {
 			if (i === at) caret = { line: lines.length - 1, index: lines.at(-1).length, col: used };
 			lines.push([]);
+			starts.push(i + 1);
 			used = 0;
 			continue;
 		}
 		const size = part === undefined ? 0 : part === "\t" ? 4 : graphemeWidth(part);
-		if (part !== undefined && used && used + size > limit) { lines.push([]); used = 0; }
+		if (part !== undefined && used && used + size > limit) { lines.push([]); starts.push(i); used = 0; }
 		if (i === at) caret = { line: lines.length - 1, index: lines.at(-1).length, col: used };
 		if (part === undefined) break;
 		lines.at(-1).push(part === "\t" ? "    " : part);
 		used += size;
 	}
-	return { lines, caret };
+	return { lines, starts, caret };
 }
 
 /**
@@ -125,6 +126,22 @@ export function editLine(line, event, limit = 200) {
 
 function cleanPaste(value) {
 	return terminalSafeText(String(value).replace(/\r\n?/g, "\n"));
+}
+
+/**
+ * SGR 마우스 보고를 화면 이벤트로. 좌표는 0부터. 가로 휠, 버튼 없는 움직임은 버린다.
+ * @returns {{type: "mouse", action: "press"|"release"|"drag"|"wheel", button: "left"|"middle"|"right"|null, x: number, y: number, delta: number, shift: boolean, alt: boolean, ctrl: boolean}|null}
+ */
+export function decodeMouse(code, column, row, final) {
+	const base = { type: "mouse", x: Math.max(0, column - 1), y: Math.max(0, row - 1), shift: Boolean(code & 4), alt: Boolean(code & 8), ctrl: Boolean(code & 16) };
+	if (code & 64) {
+		if (code & 2) return null; // 가로 휠
+		return { ...base, action: "wheel", button: null, delta: code & 1 ? 1 : -1 };
+	}
+	const button = ["left", "middle", "right"][code & 3] ?? null;
+	if (final === "m") return { ...base, action: "release", button, delta: 0 };
+	if (code & 32) return button ? { ...base, action: "drag", button, delta: 0 } : null;
+	return button ? { ...base, action: "press", button, delta: 0 } : null;
 }
 
 /** Decodes raw TTY bytes (after Node's UTF-8 StringDecoder) into safe key and bracketed-paste events. */
@@ -218,6 +235,19 @@ export class TerminalInput {
 					if (end < 0) { this.waitForSequence(); return; }
 					this.buffer = this.buffer.slice(end + (end === bel ? 1 : 2));
 					continue;
+				}
+				if (this.buffer.startsWith("\u001b[<")) {
+					// SGR 마우스: ESC [ < 버튼 ; 열 ; 줄 (M 누름·움직임 | m 뗌). 좌표는 1부터.
+					const mouse = /^\u001b\[<(\d+);(\d+);(\d+)([Mm])/.exec(this.buffer);
+					if (mouse) {
+						clearTimeout(this.timer);
+						this.timer = null;
+						this.buffer = this.buffer.slice(mouse[0].length);
+						const event = decodeMouse(Number(mouse[1]), Number(mouse[2]), Number(mouse[3]), mouse[4]);
+						if (event) this.onKey(event);
+						continue;
+					}
+					if (/^\u001b\[<[\d;]*$/.test(this.buffer)) { this.waitForSequence(); return; }
 				}
 				if (this.buffer.startsWith("\u001b[")) {
 					const final = this.buffer.slice(2).search(/[\u0040-\u007e]/);

@@ -7,7 +7,9 @@ import { createTerminalMarkdown } from "./terminal-markdown.mjs";
 import { renderStatusRow, statusMetrics, statusSegments, statusSymbols } from "./terminal-status.mjs";
 import { createHerdrReporter } from "./terminal-herdr.mjs";
 import { filterItems, renderSelector, withCaret } from "./terminal-select.mjs";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { spawn } from "node:child_process";
+import { highlightRow, indexAtColumn, rowRange, selectedText, wordRange } from "./terminal-mouse.mjs";
 
 const ESC = "\u001b[";
 const TITLE = "바이브코더 도슨트";
@@ -74,8 +76,24 @@ function stageText(job) {
 /** 서버 오류는 HTTP 상태를 붙여 보여 준다. 연결 실패에는 상태가 없다. */
 const reason = (error) => `${error?.message || String(error)}${error?.status ? ` (HTTP ${error.status})` : ""}`;
 
+/**
+ * 글을 클립보드로 보낸다. 터미널이 받아 주는 OSC 52 로 보내고(SSH 너머에서도 동작), 이 컴퓨터의 macOS 에서는 pbcopy 로도 넣는다.
+ * 너무 큰 글은 OSC 52 한도 때문에 pbcopy 만 쓴다.
+ */
+function copyToClipboard(text, { stdout, env }) {
+	if (text.length <= 70_000) stdout.write(`\u001b]52;c;${Buffer.from(text).toString("base64")}\u0007`);
+	if (process.platform === "darwin" && !env?.SSH_CONNECTION) {
+		try {
+			const child = spawn("pbcopy", [], { stdio: ["pipe", "ignore", "ignore"] });
+			child.on("error", () => {});
+			child.stdin.on("error", () => {});
+			child.stdin.end(text);
+		} catch { /* OSC 52 만으로 간다 */ }
+	}
+}
+
 /** Runs a full-screen, dependency-free TTY client. Server lifetime remains independent of this process. */
-export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = process.stdout, env = process.env, initialSession = null } = {}) {
+export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = process.stdout, env = process.env, initialSession = null, copy = null } = {}) {
 	if (!stdin.isTTY || !stdout.isTTY || typeof stdin.setRawMode !== "function") {
 		throw new Error("대화형 터미널에서 실행해야 해요. 일반 터미널에서 docent-tui 를 실행하세요.");
 	}
@@ -116,6 +134,11 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	let painted = { size: "", rows: [], cursor: "" }; // 마지막으로 화면에 쓴 줄과 커서. 바뀐 것만 다시 쓰는 기준
 	// OMP 의 showHardwareCursor 처럼 진짜 터미널 커서를 입력 위치에 두고 보인다. 한글 조합 글자와 후보 창이 그 자리에 붙는다 (ADR 0068).
 	const hardwareCursor = !["0", "false", "off"].includes(String(env?.DOCENT_HARDWARE_CURSOR ?? "").toLowerCase());
+	// 마우스 (ADR 0070). 보고를 켜면 터미널의 글자 선택이 꺼지므로 앱이 끌어서 고르기와 복사를 맡는다. DOCENT_MOUSE=0 이면 처음부터 끈다.
+	const mouse = { enabled: !["0", "false", "off"].includes(String(env?.DOCENT_MOUSE ?? "").toLowerCase()), selection: null, down: null, dragged: false, last: null, copied: "", copiedTimer: null };
+	let screenText = []; // 마지막으로 그린 화면의 평문 줄. 글자 선택과 복사의 원본
+	let mouseLayout = null; // 마지막 화면의 눌림 판정 영역(선택창 항목, 입력창 줄)
+	let lastMaxScroll = 0;
 	let historyGeneration = 0;
 	let sessionGeneration = 0;
 	let resolveFinished;
@@ -447,7 +470,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		const contentWidth = Math.max(1, width() - 2);
 		const placeholder = isSteer ? "바로잡을 내용을 입력하세요"
 			: width() >= 70 ? "궁금한 내용을 입력하세요.  / 명령   @ 세션   # 대화   $ 설정" : "궁금한 내용을 입력하세요";
-		const { lines, caret } = layoutDraft(draft.text, draft.cursor, contentWidth);
+		const { lines, starts, caret } = layoutDraft(draft.text, draft.cursor, contentWidth);
 		const maxLines = Math.max(1, Math.min(8, height() - 8));
 		const start = Math.max(0, Math.min(caret.line - maxLines + 1, lines.length - maxLines));
 		const borderRole = isSteer ? "warning" : "borderAccent";
@@ -464,7 +487,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			}
 		}
 		rows.push({ text: "─".repeat(width()), role: borderRole });
-		return { rows, caret: draft.text ? { row: 1 + caret.line - start, col: 1 + caret.col } : { row: 1, col: 1 } };
+		return { rows, caret: draft.text ? { row: 1 + caret.line - start, col: 1 + caret.col } : { row: 1, col: 1 }, lines, starts, start, shown: Math.min(lines.length - start, maxLines), empty: !draft.text };
 	}
 
 	const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -492,7 +515,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			? [["/", "명령"], ["@", "세션"], ["#", "대화"], ["$", "설정"], ["Esc", "대화 목록"], ["Enter", "보내기"], ["Ctrl+J", "줄바꿈"], ["Ctrl+C", "중단"]]
 			: [["/", "명령"], ["@", "세션"], ["#", "대화"], ["$", "설정"]];
 		return [
-			`${theme.span("title", ` ${TITLE}`)}${theme.span("dim", "  설명 전용, 코드는 바꾸지 않아요")}`,
+			`${theme.span("title", ` ${TITLE}`)}${mouse.copied ? theme.span("success", `  ${mouse.copied}`) : theme.span("dim", "  설명 전용, 코드는 바꾸지 않아요")}`,
 			` ${keys.map(([key, label]) => `${theme.span("title", key)} ${theme.span("muted", label)}`).join(theme.span("dim", " • "))}`,
 		];
 	}
@@ -542,12 +565,14 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			const view = selectorView(bodyHeight);
 			visible = view.rows;
 			caret = { row: header.length + view.caret.row, col: view.caret.col };
+			mouseLayout = { picker: view.hits.map((hit) => ({ ...hit, top: header.length + hit.top })) };
 		} else {
 			const body = conversationBody();
 			const selectedLine = body.findIndex((item) => item.selected);
 			let selectedEnd = selectedLine; // 여러 줄 카드는 마지막 줄까지 보이게 한다
 			while (selectedEnd >= 0 && body[selectedEnd + 1]?.selected) selectedEnd++;
 			const maxScroll = Math.max(0, body.length - bodyHeight);
+			lastMaxScroll = maxScroll;
 			if (state.followBottom) state.bodyScroll = maxScroll;
 			else if (state.followSelection && selectedLine >= 0) {
 				if (selectedLine < state.bodyScroll) state.bodyScroll = selectedLine;
@@ -557,6 +582,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			visible = body.slice(state.bodyScroll, state.bodyScroll + bodyHeight);
 			scroll = body.length > bodyHeight ? `${Math.round(((state.bodyScroll + bodyHeight) / body.length) * 100)}%` : "";
 			caret = { row: header.length + bodyHeight + (activity ? 1 : 0) + composer.caret.row, col: composer.caret.col };
+			mouseLayout = { composer: { textTop: header.length + bodyHeight + (activity ? 1 : 0) + 1, lines: composer.lines, starts: composer.starts, start: composer.start, shown: composer.shown, empty: composer.empty } };
 		}
 		while (visible.length < bodyHeight) visible.push({ text: "", role: "text" });
 		const output = [
@@ -567,20 +593,24 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			...completion.map(paintRow),
 			...(showFooter ? footerLines(scroll).map((line) => theme.line("text", truncateToWidth(line, columns))) : []),
 		];
+		const plain = output.map((row) => stripTerminalSequences(row));
+		screenText = plain;
+		// 고른 글자는 반전해서 보인다. 고른 줄은 색을 잃고 평문으로 그려진다.
+		const shown = mouse.selection ? output.map((row, i) => { const range = rowRange(mouse.selection, i, columns); return range ? highlightRow(plain[i], range) : row; }) : output;
 		// 진짜 커서는 프레임을 쓰는 동안 숨기고 마지막에 입력 위치로 옮겨 보인다. 그래야 한글 조합 글자가 그 자리에 붙고 깜빡이지 않는다.
 		const cursor = `${ESC}${Math.min(caret.row, rows - 1) + 1};${Math.min(caret.col, columns - 1) + 1}H${ESC}?25${hardwareCursor ? "h" : "l"}`;
 		// 바뀐 줄만 다시 쓴다. 화면 크기나 줄 수가 바뀌면 전체를 다시 그린다.
 		const size = `${columns}x${rows}`;
-		if (painted.size !== size || painted.rows.length !== output.length) {
-			stdout.write(`${ESC}?2026h${ESC}?25l${ESC}2J${ESC}H${output.join("\r\n")}${cursor}${ESC}?2026l`);
+		if (painted.size !== size || painted.rows.length !== shown.length) {
+			stdout.write(`${ESC}?2026h${ESC}?25l${ESC}2J${ESC}H${shown.join("\r\n")}${cursor}${ESC}?2026l`);
 		} else {
 			let patch = "";
-			for (let i = 0; i < output.length; i++) {
-				if (output[i] !== painted.rows[i]) patch += `${ESC}${i + 1};1H${ESC}0m${ESC}2K${output[i]}`;
+			for (let i = 0; i < shown.length; i++) {
+				if (shown[i] !== painted.rows[i]) patch += `${ESC}${i + 1};1H${ESC}0m${ESC}2K${shown[i]}`;
 			}
 			if (patch || cursor !== painted.cursor) stdout.write(`${ESC}?2026h${ESC}?25l${patch}${cursor}${ESC}?2026l`);
 		}
-		painted = { size, rows: output, cursor };
+		painted = { size, rows: shown, cursor };
 	}
 
 	/** 입력 직후 바로 그리고, 설명 스트림이나 스피너처럼 잦은 갱신은 한 프레임(16ms)에 한 번으로 묶는다. */
@@ -808,6 +838,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			command("즐겨찾기", "favorite", "star bookmark", "지금 보는 대화를 즐겨찾기에 넣거나 빼기", () => { if (needSession()) void toggleFavorite(state.thread, state.focus); }),
 			command("설정", "settings", "config model depth profile", "설명 깊이, 모델, 미리 설명, 프로필", () => openPicker("settings")),
 			command("새로고침", "refresh", "reload", "목록과 대화를 다시 불러오고 끊긴 설명에 다시 연결", rejoinOrRefresh),
+			command("마우스", "mouse", "wheel click select", mouse.enabled ? "마우스 끄기: 터미널의 글자 선택과 스크롤을 씀" : "마우스 켜기: 휠 스크롤, 클릭 선택, 끌어서 복사", () => setMouse(!mouse.enabled)),
 		];
 		if (client.active) items.push(
 			command("바로잡기", "steer", "", "진행 중인 설명의 방향 고치기", toggleSteer),
@@ -1326,6 +1357,99 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		scheduleRender();
 	}
 
+
+	// --- 마우스 (ADR 0070): OMP 전체 화면 모드와 Herdr 의 방식. 휠은 한 칸에 3줄 스크롤(선택창에서는 항목 이동), 왼쪽 클릭은 선택창 항목 고르기와 입력창 커서 옮기기,
+	// 끌면 글자를 골라 복사하고 두 번 누르면 낱말을 골라 복사한다. 오른쪽 클릭은 터미널(Herdr)에 맡긴다. ---
+	const WHEEL_LINES = 3, DOUBLE_CLICK_MS = 400;
+	const MOUSE_ON = `${ESC}?1000h${ESC}?1002h${ESC}?1006h`, MOUSE_OFF = `${ESC}?1006l${ESC}?1002l${ESC}?1000l`;
+	const copyOut = copy ?? ((text) => copyToClipboard(text, { stdout, env }));
+
+	function setMouse(enabled) {
+		mouse.enabled = enabled;
+		mouse.selection = null;
+		mouse.down = null;
+		stdout.write(enabled ? MOUSE_ON : MOUSE_OFF);
+		inform(enabled ? "마우스를 켰어요. 끌어서 글자를 고르면 복사돼요." : "마우스를 껐어요. 터미널의 글자 선택과 스크롤을 써요.");
+	}
+
+	function copySelection() {
+		const text = mouse.selection ? selectedText(screenText, mouse.selection) : "";
+		if (!text) return;
+		copyOut(text);
+		clearTimeout(mouse.copiedTimer);
+		mouse.copied = `${graphemes(text).length}자 복사함`; // 알림 줄을 늘리면 화면이 밀려 고른 자리가 어긋나므로 제목 줄 오른쪽에 잠깐 보인다
+		mouse.copiedTimer = setTimeout(() => { mouse.copied = ""; scheduleRender(); }, 2000);
+		scheduleRender();
+	}
+
+	function stepPicker(delta) {
+		const picker = state.picker, count = visibleItems().length;
+		if (!count) return;
+		picker.touched = true;
+		picker.index = Math.max(0, Math.min(picker.index + delta, count - 1));
+		scheduleRender();
+	}
+
+	function wheelScroll(lines) {
+		const next = Math.max(0, state.bodyScroll + lines);
+		state.followSelection = false;
+		state.followBottom = lines > 0 && next >= lastMaxScroll; // 맨 아래에 닿으면 새 글을 따라간다
+		state.bodyScroll = next;
+		scheduleRender();
+	}
+
+	const pickerHit = (cell) => mouseLayout?.picker?.find((hit) => cell.row >= hit.top && cell.row < hit.top + hit.height);
+
+	function clickComposer(cell) {
+		const area = mouseLayout?.composer;
+		if (!area || area.empty) return;
+		const row = cell.row - area.textTop;
+		if (row < 0 || row >= area.shown) return;
+		const line = area.start + row;
+		const draft = currentDraft();
+		draft.cursor = area.starts[line] + indexAtColumn(area.lines[line], Math.max(0, cell.col - 1));
+		draft.preferredColumn = null;
+		scheduleRender();
+	}
+
+	function handleMouse(event) {
+		if (!mouse.enabled) return;
+		if (event.action === "wheel") {
+			const completion = state.picker ? null : activeCompletion();
+			if (state.picker) stepPicker(event.delta);
+			else if (completion) moveCompletion(completion, event.delta);
+			else wheelScroll(event.delta * WHEEL_LINES);
+			return;
+		}
+		if (event.button !== "left") return;
+		const cell = { row: Math.min(event.y, height() - 1), col: Math.min(event.x, width() - 1) };
+		if (event.action === "press") {
+			const now = Date.now(), last = mouse.last;
+			const count = last && now - last.time < DOUBLE_CLICK_MS && last.row === cell.row && Math.abs(last.col - cell.col) <= 1 ? last.count + 1 : 1;
+			mouse.last = { time: now, row: cell.row, col: cell.col, count: count >= 2 ? 0 : count };
+			mouse.selection = null;
+			mouse.dragged = false;
+			mouse.down = { ...cell, handled: false };
+			const hit = state.picker ? pickerHit(cell) : null;
+			if (hit) { state.picker.index = hit.index; state.picker.touched = true; }
+			else if (count >= 2) {
+				const range = wordRange(screenText[cell.row] ?? "", cell.col);
+				if (range) { mouse.selection = { anchor: { row: cell.row, col: range.start }, focus: { row: cell.row, col: range.end } }; copySelection(); }
+				mouse.down.handled = true;
+			}
+			scheduleRender();
+		} else if (event.action === "drag" && mouse.down && !mouse.down.handled) {
+			if (cell.row !== mouse.down.row || cell.col !== mouse.down.col) mouse.dragged = true;
+			if (mouse.dragged) { mouse.selection = { anchor: { row: mouse.down.row, col: mouse.down.col }, focus: cell }; scheduleRender(); }
+		} else if (event.action === "release" && mouse.down) {
+			const down = mouse.down;
+			mouse.down = null;
+			if (down.handled) return;
+			if (mouse.dragged) copySelection();
+			else if (state.picker) { if (pickerHit(cell)) choosePicker(); }
+			else clickComposer(cell);
+		}
+	}
 	const term = String(process.env.TERM ?? "");
 	const titleSupported = Boolean(term) && term !== "dumb";
 	let terminalRestored = false;
@@ -1335,7 +1459,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		try { stdin.setRawMode(originalRaw); } catch {}
 		try { stdin.pause(); } catch {}
 		try {
-			stdout.write(`${ESC}0m${ESC}?2004l${ESC}?25h${ESC}?1049l${titleSupported ? `${ESC}23;0t` : ""}`);
+			stdout.write(`${ESC}0m${ESC}?2004l${mouse.enabled ? MOUSE_OFF : ""}${ESC}?25h${ESC}?1049l${titleSupported ? `${ESC}23;0t` : ""}`);
 		} catch {}
 	}
 
@@ -1366,6 +1490,15 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 
 	function key(event) {
 		if (!state.running) return;
+		if (event.type === "mouse") { handleMouse(event); return; }
+		// 마우스로 고른 글자는 키를 누르면 풀린다. 고른 글자가 있을 때 Ctrl+C 는 복사하고 설명을 멈추지 않는다.
+		if (mouse.selection) {
+			const copyOnly = event.type === "key" && event.key === "interrupt";
+			if (copyOnly) copySelection();
+			mouse.selection = null;
+			scheduleRender();
+			if (copyOnly) return;
+		}
 		// 선택창이 열려 있으면 글자와 붙여넣기는 검색창으로 간다.
 		if (state.picker && (event.type === "text" || event.type === "paste")) { pickerKey(event); return; }
 		if (event.type === "paste") {
@@ -1461,7 +1594,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	const onSignal = () => exit();
 	const onEnd = () => exit();
 	const onData = (data) => input.feed(data);
-	const resizeHandler = () => scheduleRender();
+	const resizeHandler = () => { mouse.selection = null; mouse.down = null; scheduleRender(); };
 	try {
 		stdin.setRawMode(true);
 		stdin.setEncoding("utf8");
@@ -1472,7 +1605,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		process.on("SIGWINCH", resizeHandler);
 		process.once("SIGTERM", onSignal);
 		process.once("SIGHUP", onSignal);
-		stdout.write(`${titleSupported ? `\u001b[22;0t\u001b]2;${TITLE}\u0007` : ""}${ESC}?1049h${ESC}?25l${ESC}?2004h`);
+		stdout.write(`${titleSupported ? `\u001b[22;0t\u001b]2;${TITLE}\u0007` : ""}${ESC}?1049h${ESC}?25l${ESC}?2004h${mouse.enabled ? MOUSE_ON : ""}`);
 		loadModels();
 		if (initialSession) {
 			// docent herdr / OMP /docent: 지정한 세션을 바로 연다. 최근 200개 밖이어도 id 로 열 수 있다.

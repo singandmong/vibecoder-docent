@@ -23,6 +23,8 @@ const HELP = [
 	"Ctrl+C 진행 중인 설명 중단 | Ctrl+D 종료 | PgUp/PgDn 으로 긴 대화를 스크롤해요.",
 	"붙여넣기로 여러 줄을 입력할 수 있고 q, i, ! 같은 글자도 그대로 입력돼요.",
 	"한글 입력이 어긋나면 DOCENT_HARDWARE_CURSOR=0 으로 진짜 커서를 숨길 수 있어요.",
+	"마우스: 휠 스크롤(한 칸에 3줄), 클릭으로 선택창 항목 고르기와 입력창 커서 옮기기, 끌어서 복사, 두 번 눌러 낱말 복사.",
+	"터미널(Herdr)의 글자 선택이 필요하면 /마우스 로 끄거나 DOCENT_MOUSE=0 으로 시작하세요.",
 ].join("\n");
 
 function usageError(message) {

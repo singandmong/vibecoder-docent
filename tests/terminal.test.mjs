@@ -15,7 +15,8 @@ async function terminal(t, baseUrl, { stage = "thread" } = {}) {
 	const stdin = new PassThrough();
 	stdin.isTTY = true;
 	stdin.setRawMode = (value) => { stdin.isRaw = value; };
-	let screen = "", frames = 0, closed = false, grid = [], patchedRows = null, cursor = null;
+	let screen = "", frames = 0, closed = false, grid = [], patchedRows = null, cursor = null, other = "";
+	const copied = [];
 	// 화면 전체를 그리는 프레임과 바뀐 줄만 고치는 프레임을 모두 반영한 가상 화면. 진짜 커서 위치(1부터)와 보임도 따라간다.
 	const stdout = new Writable({ write(chunk, _encoding, done) {
 		const text = String(chunk);
@@ -32,10 +33,11 @@ async function terminal(t, baseUrl, { stage = "thread" } = {}) {
 			screen = stripVTControlCharacters(grid.join("\r\n"));
 			frames++;
 		}
+		else other += text;
 		done();
 	} });
 	Object.assign(stdout, { isTTY: true, columns: 84, rows: 31 });
-	const finished = runTerminal({ baseUrl, stdin, stdout, env: {} });
+	const finished = runTerminal({ baseUrl, stdin, stdout, env: {}, copy: (text) => copied.push(text) });
 	finished.catch(() => {});
 	const ui = {
 		get screen() { return screen; },
@@ -43,7 +45,16 @@ async function terminal(t, baseUrl, { stage = "thread" } = {}) {
 		get cursor() { return cursor; },
 		/** 마지막 프레임이 고친 줄 수. 전체를 다시 그렸으면 null. */
 		get patchedRows() { return patchedRows; },
+		/** 프레임이 아닌 출력(마우스 보고 켜기·끄기, 제목 같은 것). */
+		get other() { return other; },
+		/** 마우스로 고르거나 두 번 눌러 복사한 글 목록. */
+		copied,
 		send: (keys) => stdin.write(keys),
+		/** SGR 마우스 입력. 좌표는 화면의 0부터. action: press, release, drag, wheel-up, wheel-down. */
+		mouse(action, x, y, { shift = false } = {}) {
+			const code = { press: 0, release: 0, drag: 32, "wheel-up": 64, "wheel-down": 65 }[action] | (shift ? 4 : 0);
+			stdin.write(`\u001b[<${code};${x + 1};${y + 1}${action === "release" ? "m" : "M"}`);
+		},
 		finished,
 		async key(keys) { const before = frames; stdin.write(keys); await until(() => frames > before); },
 		async resize(columns, rows) { const before = frames; Object.assign(stdout, { columns, rows }); stdout.emit("resize"); await until(() => frames > before); },
@@ -569,4 +580,113 @@ test("the settings selector defaults to the session's model, and a model scope n
 	assert.deepEqual((await f.api("/api/profiles")).body[0].modelScope, [secondModel]);
 	await ui.key("$cheap");
 	assert.ok(ui.screen.includes("맞는 설정이 없어요"), "a model outside the scope is hidden from the settings list");
+});
+
+/** 목록 응답을 30개 세션으로 부풀리는 중계. 첫 세션만 진짜다. */
+async function manySessions(t, f) {
+	const proxy = createServer((req, res) => {
+		const upstream = request(new URL(req.url, f.address), { method: req.method, headers: req.headers }, (response) => {
+			if (req.url !== "/api/sessions") { res.writeHead(response.statusCode, response.headers); response.pipe(res); return; }
+			let body = "";
+			response.on("data", (chunk) => { body += chunk; });
+			response.on("end", () => {
+				const [first] = JSON.parse(body);
+				const list = Array.from({ length: 30 }, (_, i) => ({ ...first, id: i ? `${first.id}#${i}` : first.id, title: `세션 ${String(i + 1).padStart(2, "0")}` }));
+				res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify(list));
+			});
+		});
+		upstream.on("error", () => res.destroy());
+		req.pipe(upstream);
+	});
+	proxy.listen(0, "127.0.0.1");
+	await once(proxy, "listening");
+	t.after(() => proxy.close());
+	return `http://127.0.0.1:${proxy.address().port}`;
+}
+
+const rowOf = (ui, text) => ui.screen.split(/\r?\n/).findIndex((line) => line.includes(text));
+
+test("mouse reporting is switched on at start, and /마우스 turns it off and on again", async (t) => {
+	const f = await fixture(t);
+	const ui = await terminal(t, f.address);
+	assert.ok(ui.other.includes("\u001b[?1000h\u001b[?1002h\u001b[?1006h"), "SGR mouse reporting is requested");
+	await ui.key("/마우스");
+	await ui.key("\r");
+	await until(() => ui.other.includes("\u001b[?1006l\u001b[?1002l\u001b[?1000l"));
+	await ui.key("/mouse");
+	await ui.key("\r");
+	await until(() => ui.other.lastIndexOf("?1000h") > ui.other.lastIndexOf("?1000l"));
+});
+
+test("in a selector the wheel moves the choice one item per notch without wrapping, and a click chooses the item under the pointer", async (t) => {
+	const f = await fixture(t);
+	const ui = await terminal(t, await manySessions(t, f), { stage: "sessions" });
+	const counter = () => ui.screen.match(/(\d+)\/30\s*$/m)?.[1];
+	assert.equal(counter(), "1");
+	ui.mouse("wheel-down", 10, 10);
+	await until(() => counter() === "2");
+	ui.mouse("wheel-up", 10, 10);
+	ui.mouse("wheel-up", 10, 10);
+	await until(() => counter() === "1");
+	ui.mouse("wheel-up", 10, 10);
+	await new Promise((resolve) => setTimeout(resolve, 60));
+	assert.equal(counter(), "1", "the wheel stops at the first item");
+	const y = rowOf(ui, "세션 03");
+	assert.ok(y > 0, ui.screen);
+	ui.mouse("press", 10, y);
+	await until(() => ui.screen.split(/\r?\n/).find((line) => line.includes("→"))?.includes("세션 03") || ui.screen.split(/\r?\n/)[y - 1].includes("→"));
+	assert.equal(counter(), "3", "pressing selects the item");
+	assert.equal(ui.screen.includes("대화 선택"), false, "the item is chosen on release, not on press");
+	ui.mouse("release", 10, y);
+	await until(() => ui.screen.includes("대화 선택"));
+});
+
+test("clicking in the composer puts the caret on the clicked syllable", async (t) => {
+	const f = await fixture(t);
+	const ui = await terminal(t, f.address);
+	await ui.key("가나다라마");
+	const y = rowOf(ui, "가나다라마");
+	assert.ok(y > 0);
+	assert.equal(ui.cursor.col, 12, "after five double-width syllables");
+	ui.mouse("press", 5, y);
+	ui.mouse("release", 5, y);
+	await until(() => ui.cursor.col === 6);
+	await ui.key("X");
+	assert.match(ui.screen, /가나X▏?다라마/, "typing continues at the clicked position");
+});
+
+test("dragging selects screen text and copies it, and a double click selects and copies one word", async (t) => {
+	const f = await fixture(t);
+	const ui = await terminal(t, f.address);
+	await ui.key("복사할 문장입니다");
+	let y = rowOf(ui, "복사할 문장입니다");
+	ui.mouse("press", 1, y);
+	ui.mouse("drag", 3, y);
+	ui.mouse("drag", 6, y);
+	ui.mouse("release", 6, y);
+	await until(() => ui.copied.length === 1);
+	assert.deepEqual(ui.copied, ["복사할"], "the selected cells are copied, wide characters whole");
+	await ui.key("\u0015");
+	await ui.key("alpha-beta/gamma delta");
+	y = rowOf(ui, "alpha-beta/gamma delta");
+	ui.mouse("press", 8, y);
+	ui.mouse("release", 8, y);
+	ui.mouse("press", 8, y);
+	ui.mouse("release", 8, y);
+	await until(() => ui.copied.length === 2);
+	assert.equal(ui.copied[1], "alpha-beta/gamma", "path and kebab characters keep a word whole");
+});
+
+test("the wheel scrolls a long conversation three lines per notch and follows new text again at the bottom", async (t) => {
+	const f = await fixture(t);
+	for (let i = 1; i <= 25; i++) await f.ask(`wheel-${i}`, "default", { question: `질문 ${String(i).padStart(2, "0")}` });
+	const ui = await terminal(t, f.address);
+	await until(() => ui.screen.includes("질문 25"));
+	assert.equal(ui.screen.includes("질문 01"), false);
+	for (let i = 0; i < 80; i++) ui.mouse("wheel-up", 10, 10);
+	await until(() => ui.screen.includes("질문 01"));
+	assert.equal(ui.screen.includes("질문 25"), false, "scrolled to the top");
+	for (let i = 0; i < 120; i++) ui.mouse("wheel-down", 10, 10);
+	await until(() => ui.screen.includes("질문 25"));
 });
