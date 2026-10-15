@@ -2,6 +2,10 @@
 
 형식: [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/). 버전은 [SemVer](https://semver.org/lang/ko/). 0.x 동안은 minor 가 새 기능, patch 가 고침.
 
+## [0.29.1] — 2026-10-15
+
+### 고침
+- 서버를 다시 켜는 사이 뜬 "실시간 연결에 실패했어요: fetch failed" 문구가 다시 연결된 뒤에도 남던 문제. 연결이 열리면 그 안내를 지움. 실패 문구에 "다시 연결하는 중이에요"를 붙임.
 ## [0.29.0] — 2026-10-15
 
 ### 추가

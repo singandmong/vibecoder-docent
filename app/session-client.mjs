@@ -355,7 +355,7 @@ export function createSessionClient({ transport, drafts, cards = () => [], newRe
 				try {
 					await transport.events(opened.sessionId, opened.profileId, controller.signal, (event) => {
 						if (!controller.signal.aborted && context === opened) emit({ type: "live", event });
-					});
+					}, () => { if (!controller.signal.aborted && context === opened) { emit({ type: "live-status", status: "open" }); delay = LIVE_RETRY_FIRST; } });
 					if (controller.signal.aborted) return;
 					emit({ type: "live-status", status: "closed" });
 					delay = LIVE_RETRY_FIRST;

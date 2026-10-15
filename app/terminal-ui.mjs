@@ -1311,7 +1311,12 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	function applyChange(change) {
 		if (change.type === "live") { handleEvent(change.event); return; }
 		if (change.type === "live-status") {
-			state.liveNotice = change.status === "closed" ? "실시간 연결이 닫혔어요. 다시 연결하는 중이에요." : `실시간 연결에 실패했어요: ${terminalSafeText(change.error)}`;
+			if (change.status === "open") {
+				if (state.liveConnection) { state.liveNotice = ""; state.liveConnection = false; scheduleRender(); }
+				return;
+			}
+			state.liveConnection = true;
+			state.liveNotice = change.status === "closed" ? "실시간 연결이 닫혔어요. 다시 연결하는 중이에요." : `실시간 연결에 실패했어요: ${terminalSafeText(change.error)}. 다시 연결하는 중이에요.`;
 			scheduleRender();
 			return;
 		}

@@ -121,7 +121,7 @@ export class HttpTransport {
 	}
 
 	/** 세션의 실시간 사건(SSE). 연결이 닫히면 돌아온다. 다시 붙는 일은 부르는 쪽이 한다. */
-	async events(sessionId, profileId, signal, onEvent) {
+	async events(sessionId, profileId, signal, onEvent, onOpen) {
 		const query = new URLSearchParams({ id: sessionId, profileId });
 		let response;
 		try {
@@ -131,6 +131,7 @@ export class HttpTransport {
 			throw error;
 		}
 		if (!response.body) throw new TransportError("실시간 응답 본문이 비어 있어요.");
+		onOpen?.();
 		let data = [];
 		const dispatch = () => {
 			if (!data.length) return;

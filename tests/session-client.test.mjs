@@ -239,6 +239,7 @@ test("live events follow the session and reconnect after the stream closes", asy
 	server.lives[0].finish({});
 	await until(() => server.lives.length === 2, 3000);
 	assert.ok(changes.some((change) => change.type === "live-status" && change.status === "closed"));
+	assert.equal(changes.filter((change) => change.type === "live-status" && change.status === "open").length, 2, "each successful (re)connection is announced so a stale warning can be cleared");
 	client.close();
 	await following;
 });
