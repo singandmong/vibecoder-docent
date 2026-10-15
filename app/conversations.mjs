@@ -106,3 +106,30 @@ export function cardsPayload(cards) {
 	}
 	return [...byThread.values()].slice(-CARDS_MAX);
 }
+
+/** 분야별 설명 깊이의 분야 이름(서버 depth.mjs 의 DOMAINS 와 같은 키). */
+export const DOMAINS = { frontend: "프론트엔드", backend: "백엔드", server: "서버", database: "데이터베이스", design: "디자인", service: "서비스", other: "기타" };
+
+/** 바로 질문: 요청문을 입력창에 채우기만 하고 사람이 보내야 설명을 요청한다. name 은 터미널 명령 이름(한글, 영문). */
+export const EXPLAIN_ACTIONS = [
+	{ label: "초등학생도 이해할 수 있는 설명", name: ["쉽게", "simple"], prompt: "초등학생도 이해할 수 있게 쉬운 단어와 친숙한 예시로 설명해줘. 사용자를 어린이로 취급하지 말고 정확한 의미와 중요한 조건은 유지해줘.", difficulty: "EASY" },
+	{ label: "10초 안에 이해가능하게 설명", name: ["10초", "quick"], prompt: "10초 안에 읽고 핵심을 이해할 수 있도록 중요한 결론과 이유를 2~3개의 짧은 문장으로 설명해줘. 생성 시간을 약속하는 뜻은 아니고, 읽는 분량을 짧게 해줘.", difficulty: "EASY" },
+	{ label: "앞뒤 맥락이랑 같이 설명", name: ["맥락", "context"], prompt: "이 내용 앞에 무슨 일이 있었고 왜 지금 이 이야기가 나왔는지, 다음 단계와 어떻게 이어지는지 쉬운 말로 설명해줘. 현재 전사로 확인한 사실과 추측을 구분해줘.", difficulty: "EASY" },
+];
+
+const SOURCE_ROLE = { user: "사용자가 보낸 메시지", assistant: "에이전트가 쓴 메시지", tool: "도구 실행 결과", system: "시스템 기록" };
+const SOURCE_TIME = new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric", hour: "numeric", minute: "2-digit" });
+
+/** 원문 출처를 사람이 읽는 말로. 예: "에이전트가 쓴 메시지 (9월 26일 오전 11:30)". 서브에이전트면 이름을 앞에 붙인다. */
+export function sourceLabel(entry) {
+	const who = `${entry.agent ? `서브에이전트 ${entry.agent}의 ` : ""}${SOURCE_ROLE[entry.role] ?? "기록"}`;
+	const time = entry.timestamp ? new Date(entry.timestamp) : null;
+	return time && Number.isFinite(time.getTime()) ? `${who} (${SOURCE_TIME.format(time)})` : who;
+}
+
+/** 답 아래 메타 줄: 설명 모드(어디서 정했는지), 요청 모델(어디서 왔는지), 걸린 시간 (ADR 0069). */
+export function answerMeta(r) {
+	const depthSource = { question: "바로 질문", domain: "영역별 설정", profile: "기본값" }[r?.difficultySource];
+	const model = typeof r?.model === "string" ? `${r.model}${r.modelSource === "session" ? " (세션 모델)" : ""}` : r?.model === null ? (r.modelSource === "default" ? "omp 기본 모델 (세션 모델을 알 수 없음)" : "omp 기본 모델") : null;
+	return [r?.difficulty ? `설명 모드 ${r.difficulty}${depthSource ? ` (${depthSource})` : ""}` : "", model ? `요청 모델: ${model}` : "", Number.isFinite(r?.ms) ? `${Math.round(r.ms / 1000)}초 걸림` : ""].filter(Boolean).join(", ");
+}

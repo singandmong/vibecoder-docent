@@ -87,6 +87,19 @@ export class HttpTransport {
 	models(signal) { return this.json("/api/models", { signal }); }
 	/** 이 세션의 모델(모델을 고르지 않았을 때 설명에 쓰임). {raw, model}: model 이 null 이면 omp 기본 모델 */
 	sessionModel(sessionId, signal) { return this.json(`/api/session-model?${new URLSearchParams({ id: sessionId })}`, { signal }); }
+	evidence(sessionId, ref, profileId = "default", signal) {
+		const query = new URLSearchParams({ id: sessionId, ref, profileId });
+		return this.json(`/api/evidence?${query}`, { signal });
+	}
+	glossary(profileId = "default", signal) {
+		return this.json(`/api/glossary?${new URLSearchParams({ profileId })}`, { signal });
+	}
+	wiki(profileId = "default", signal) {
+		return this.json(`/api/wiki?${new URLSearchParams({ profileId })}`, { signal });
+	}
+	wikiExtract(profileId = "default") {
+		return this.json("/api/wiki/extract", { method: "POST", body: { profileId } });
+	}
 	updateProfile(id, patch) { return this.json(`/api/profiles/${encodeURIComponent(id)}`, { method: "PATCH", body: patch }); }
 	favorites(sessionId, profileId, signal) {
 		const query = new URLSearchParams({ profileId, id: sessionId });

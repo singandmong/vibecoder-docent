@@ -1,4 +1,4 @@
-import { cardDisplay, conversationList, excerpt, summarySentences, threadRows } from "./conversations.mjs";
+import { answerMeta, cardDisplay, conversationList, excerpt, sourceLabel, summarySentences, threadRows } from "./conversations.mjs";
 import { createSessionClient } from "./session-client.mjs";
 import { HttpTransport } from "./transport.mjs";
 import { TerminalInput, editLine, graphemes, layoutDraft, terminalSafeText, wrapTerminalText } from "./terminal-input.mjs";
@@ -121,10 +121,10 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		focus: null, thread: "",
 		purpose: "ask", drafts: new Map(),
 		picker: null, // {kind, query:{text,cursor}, index, start, page, touched, auto} 선택창이 열려 있을 때
-		selectedAnswer: null, settling: null,
+		selectedAnswer: null, expandedAnswers: new Set(), settling: null,
 		bodyScroll: 0, followSelection: true, followBottom: false,
 		notice: "", noticeError: false, noticeKind: "info", liveNotice: "",
-		completion: { key: "", index: 0, dismissed: null }, models: null, favorites: null,
+		completion: { key: "", index: 0, dismissed: null }, models: null, favorites: null, wiki: null, evidence: null, panel: null,
 		sessionModel: null, // 이 세션의 모델 {raw, model}. 모델을 고르지 않았을 때(기본) 설명에 쓰인다 (ADR 0069)
 		scopeDraft: new Set(), // 모델 범위 선택창에서 고르는 중인 모델
 	};
@@ -231,6 +231,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		return [...list.filter((o) => o.kind === "all"), ...list.filter((o) => o.kind === "card").reverse(), ...list.filter((o) => o.kind === "saved")];
 	}
 	const answerText = (answer) => (answer && typeof answer === "object" ? [answer.headline, answer.explain, ...(answer.details ?? [])].filter(Boolean).join("\n\n") : "");
+	const answerKey = (row) => `${row?.ts ?? ""}\u0000${row?.question ?? ""}`;
 
 	/** 세션 카드: 어디(저장소, 브랜치, 워크트리)와 언제, 제목, 최근 작업 한 줄 (ADR 0045). */
 	const sessionCard = (session, selected, current) => {
@@ -402,9 +403,25 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		divider(items);
 		addUserMessage(items, row.display || row.question || "질문 내용을 찾을 수 없어요.", row.steers, selected, meta);
 		divider(items);
-		const text = answerText(row.answer);
-		if (text) addMarkdown(items, text);
-		else add(items, " 아직 저장된 답변이 없어요.", { role: "muted" });
+		const answer = row.answer && typeof row.answer === "object" ? row.answer : null;
+		if (!answer) {
+			add(items, " 아직 저장된 답변이 없어요.", { role: "muted" });
+			return;
+		}
+		if (answer.headline) addMarkdown(items, answer.headline, "title");
+		if (answer.explain) addMarkdown(items, answer.explain);
+		const details = Array.isArray(answer.details) ? answer.details.filter(Boolean) : [];
+		if (details.length) {
+			const open = state.expandedAnswers.has(answerKey(row));
+			items.push({ text: theme.span("label", ` ${open ? "자세히" : "자세히 보기"}${open ? "" : " (/자세히)"}`), role: "text", rich: true });
+			if (open) for (const detail of details) addMarkdown(items, detail);
+		}
+		const metaText = answerMeta(answer);
+		if (metaText) add(items, metaText, { role: "muted" });
+		for (const citation of answer.citations ?? []) {
+			if (!citation?.id || !citation?.sessionId) continue;
+			add(items, `원문 인용: ${sourceLabel(citation)} (/근거)`, { role: "muted" });
+		}
 	}
 
 	function addAskBlock(items, ask) {
@@ -423,6 +440,174 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		items.push({ text: theme.span("dim", " 지금 설명이 끝나면 차례대로 보내요. /대기 로 마지막 질문을 입력창에 돌려놔요."), role: "text", rich: true });
 	}
 
+	function reviewItems() {
+		const data = state.wiki;
+		if (!data || data.loading) return [{ label: "용어 사전을 불러오는 중", pinned: true, keepOpen: true, description: "잠시만 기다려 주세요" }];
+		const items = [];
+		if (data.pending) items.push({
+			label: `용어 정리 (${data.pending}개)`, pinned: true, keepOpen: true, search: "extract 정리 용어 glossary",
+			description: "지난 문답에서 핵심 기술 용어를 찾아요",
+			run: () => void extractWiki(),
+		});
+		for (const entry of data.entries ?? []) {
+			items.push({
+				label: entry.term,
+				search: `${entry.term} ${entry.gloss}`,
+				description: `${entry.count}번, ${entry.gloss}`,
+				entry,
+				preview: (_columns, max) => clipLines([
+					theme.span("title", ` ${entry.term}`),
+					theme.span("muted", ` ${entry.gloss}`),
+					"",
+					...entry.contexts.slice(0, Math.max(1, max - 3)).map((context) => theme.span("dim", ` ${dateLabel(context.ts)}  ${clipLine(context.headline || context.question, width() - 4)}`)),
+				], max, "Enter 로 관련 문답 보기"),
+				run: () => showGlossaryEntry(entry),
+			});
+		}
+		return items;
+	}
+
+	function addEvidenceEntry(items, title, entry, selected = false) {
+		if (!entry) return;
+		items.push({ text: theme.span(selected ? "title" : "label", ` ${title}`), role: "text", rich: true, selected });
+		const label = sourceLabel(entry);
+		add(items, label, { role: "muted" });
+		if (entry.role === "tool") add(items, entry.text || "원문이 비어 있어요.", { role: "text" });
+		else addMarkdown(items, entry.text || "원문이 비어 있어요.");
+		divider(items);
+	}
+
+	function panelBody() {
+		const items = [];
+		if (state.panel?.kind === "term") {
+			const entry = state.panel.entry;
+			items.push({ text: theme.span("title", ` [용어] ${entry.term}`), role: "text", rich: true });
+			add(items, entry.gloss, { role: "muted" });
+			divider(items);
+			for (const context of entry.contexts ?? []) {
+				add(items, `${dateLabel(context.ts)}  ${context.question || "질문 내용을 찾을 수 없어요."}`, { role: "label" });
+				if (context.headline) add(items, context.headline, { role: "text" });
+				if (context.code) add(items, `코드 ${context.code.lang ? `(${context.code.lang})` : ""}`, { role: "dim" });
+				divider(items);
+			}
+			add(items, "Esc 로 용어 목록으로 돌아가요.", { role: "dim" });
+			return items;
+		}
+		const evidence = state.evidence;
+		if (!evidence) return items;
+		items.push({ text: theme.span("title", " [근거] 답변이 인용한 원문"), role: "text", rich: true });
+		if (evidence.loading) {
+			add(items, "현재 원문을 확인하는 중이에요.", { role: "muted" });
+			if (evidence.citation) addEvidenceEntry(items, "답변 당시 저장한 발췌", evidence.citation);
+			return items;
+		}
+		if (evidence.error) {
+			add(items, `원문을 확인하지 못했어요: ${evidence.error}`, { role: "error" });
+			addEvidenceEntry(items, "답변 당시 저장한 발췌", evidence.citation);
+			return items;
+		}
+		const result = evidence.result;
+		add(items, result?.available ? "현재 원문에서 확인한 근거예요." : "현재 원문을 확인할 수 없어요. 저장된 발췌를 보여 줘요.", { role: "muted" });
+		if (result?.message) add(items, result.message, { role: "dim" });
+		if (result?.available) {
+			for (const entry of result.before ?? []) addEvidenceEntry(items, "바로 앞 기록", entry);
+			addEvidenceEntry(items, "설명에 쓴 부분", result.selected, true);
+			for (const entry of result.after ?? []) addEvidenceEntry(items, "바로 뒤 기록", entry);
+		} else addEvidenceEntry(items, "저장해 둔 발췌", result?.selected || evidence.citation, true);
+		addEvidenceEntry(items, "답변 당시 저장한 발췌", evidence.citation);
+		add(items, "Esc 로 대화로 돌아가요.", { role: "dim" });
+		return items;
+	}
+
+	function openReview() {
+		state.panel = null;
+		state.wiki = { loading: true, entries: [], pending: 0 };
+		openPicker("review");
+		void api.wiki(selectedProfileId(state.profile)).then((data) => {
+			if (!state.running) return;
+			state.wiki = data && typeof data === "object" ? data : { entries: [], pending: 0 };
+			scheduleRender();
+		}).catch((error) => {
+			state.wiki = { entries: [], pending: 0, error: reason(error) };
+			failNotice(`배운 내용을 불러오지 못했어요: ${reason(error)}`);
+		});
+	}
+
+	async function extractWiki() {
+		try {
+			state.wiki = { ...(state.wiki ?? {}), loading: true };
+			scheduleRender();
+			await api.wikiExtract(selectedProfileId(state.profile));
+			state.wiki = await api.wiki(selectedProfileId(state.profile));
+			succeed("용어 사전을 갱신했어요.");
+		} catch (error) {
+			state.wiki = { ...(state.wiki ?? {}), loading: false, error: reason(error) };
+			failNotice(`용어를 정리하지 못했어요: ${reason(error)}`);
+		}
+		scheduleRender();
+	}
+
+	function showGlossaryEntry(entry) {
+		state.panel = { kind: "term", entry };
+		state.picker = null;
+		state.bodyScroll = 0;
+		state.followSelection = true;
+		scheduleRender();
+	}
+
+	function currentAnswerRow() {
+		const selected = state.selectedAnswer && displayedHistory().find((row) => isAnswerSelected(row));
+		return selected || displayedHistory().at(-1) || null;
+	}
+
+	function evidenceItems() {
+		const row = currentAnswerRow();
+		return (row?.answer?.citations ?? []).filter((citation) => citation?.id && citation?.sessionId).map((citation) => ({
+			label: sourceLabel(citation),
+			search: `${sourceLabel(citation)} ${citation.excerpt ?? ""}`,
+			description: citation.excerpt || "답변 당시 저장한 원문 발췌",
+			citation,
+			preview: (_columns, max) => clipLines([theme.span("title", ` ${sourceLabel(citation)}`), "", ...markdownLines(citation.excerpt || "발췌가 없어요.", width())], max, "Enter 로 현재 원문 확인"),
+			run: () => void loadEvidence(citation),
+		}));
+	}
+
+	function openEvidencePicker() {
+		if (!needSession()) return;
+		const citations = evidenceItems();
+		if (!citations.length) { inform("현재 답변에 저장된 원문 인용이 없어요."); return; }
+		state.panel = null;
+		state.evidence = null;
+		openPicker("evidence");
+	}
+
+	async function loadEvidence(citation) {
+		state.picker = null;
+		state.evidence = { loading: true, citation };
+		state.bodyScroll = 0;
+		scheduleRender();
+		try {
+			const result = await api.evidence(citation.sessionId, citation.id, selectedProfileId(state.profile));
+			if (!state.running) return;
+			state.evidence = { loading: false, citation, result };
+		} catch (error) {
+			state.evidence = { loading: false, citation, error: reason(error) };
+		}
+		scheduleRender();
+	}
+
+	function toggleDetails() {
+		const row = currentAnswerRow();
+		const details = row?.answer?.details;
+		if (!row || !Array.isArray(details) || !details.length) { inform("자세히 볼 세부 내용이 없어요."); return; }
+		const key = answerKey(row);
+		if (state.expandedAnswers.has(key)) state.expandedAnswers.delete(key);
+		else state.expandedAnswers.add(key);
+		state.selectedAnswer = { ts: row.ts, question: row.question ?? "" };
+		state.followSelection = true;
+		scheduleRender();
+	}
+
 	/** 열려 있는 대화의 제목 줄: 어느 대화인지, 즐겨찾기인지, 목록으로 돌아가는 키. */
 	function threadHeading() {
 		const option = conversationOptions().find((entry) => entry.thread === state.thread);
@@ -436,6 +621,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 
 	function conversationBody() {
 		const items = [];
+		if (state.panel || state.evidence) return panelBody();
 		if (!state.session) {
 			divider(items);
 			add(items, " 먼저 세션을 고르세요.", { role: "title" });
@@ -625,6 +811,8 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		sessions: { title: "세션 선택", placeholder: "제목, 저장소, 브랜치, 폴더로 찾기", empty: "맞는 세션이 없어요. 글자를 지우거나 Ctrl+R 로 목록을 새로 불러오세요.", keys: "Enter 열기  Ctrl+R 새로고침" },
 		conversations: { title: "대화 선택", placeholder: "제목, 요약으로 찾기", empty: "맞는 대화가 없어요. 글자를 지워 보세요.", keys: "Enter 열기  Ctrl+F 즐겨찾기" },
 		answers: { title: "저장된 답변", placeholder: "질문, 답으로 찾기", empty: "이 대화에는 맞는 저장된 답변이 없어요.", keys: "Enter 이 답변으로" },
+		evidence: { title: "원문 근거", placeholder: "출처, 발췌로 찾기", empty: "현재 답변에 저장된 원문 인용이 없어요.", keys: "Enter 원문 확인" },
+		review: { title: "배운 내용 다시보기", placeholder: "용어, 뜻으로 찾기", empty: "아직 모인 용어가 없어요.", keys: "Enter 보기  Esc 닫기" },
 		profiles: { title: "프로필 선택", placeholder: "프로필 이름으로 찾기", empty: "맞는 프로필이 없어요.", keys: "Enter 선택" },
 		settings: { title: "설정", placeholder: "깊이, 모델, 미리 설명, 프로필로 찾기", empty: "맞는 설정이 없어요. 글자를 지워 보세요.", keys: "Enter 바꾸기" },
 		modelScope: { title: "모델 범위", placeholder: "제공자, 모델 이름으로 찾기", empty: "맞는 모델이 없어요. 글자를 지워 보세요.", keys: "Enter 담기·빼기, 맨 위 항목으로 저장" },
@@ -634,6 +822,8 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		if (kind === "sessions") return sessionItems();
 		if (kind === "conversations") return conversationItems();
 		if (kind === "answers") return answerItems();
+		if (kind === "evidence") return evidenceItems();
+		if (kind === "review") return reviewItems();
 		if (kind === "profiles") return profileItems();
 		if (kind === "modelScope") return modelScopeItems();
 		return settingsItems();
@@ -643,6 +833,8 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		if (kind === "sessions") return `도슨트가 함께 읽을 작업 기록 • ${state.sessions.length}개`;
 		if (kind === "conversations") return `카드 ${state.cards.length} • 저장 ${conversationOptions().filter((option) => option.kind === "saved").length}`;
 		if (kind === "answers") return "모델을 다시 부르지 않아요";
+		if (kind === "evidence") return `인용 ${evidenceItems().length}개, 원문은 선택해서 확인`;
+		if (kind === "review") return state.wiki?.error ? `용어 사전을 불러오지 못했어요: ${state.wiki.error}` : `용어 ${state.wiki?.entries?.length ?? 0}개${state.wiki?.pending ? `, 정리 대기 ${state.wiki.pending}개` : ""}`;
 		if (kind === "profiles") return "프로필마다 학습 기록과 설명 깊이가 나뉘어요";
 		if (kind === "modelScope") return `고른 ${state.scopeDraft.size}개 • Esc 로 저장하지 않고 닫기`;
 		if (state.models?.loading) return "모델 목록을 불러오는 중이에요";
@@ -835,6 +1027,9 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			command("세션", "session", "", "함께 읽을 작업 세션 고르기", () => openPicker("sessions")),
 			command("대화", "thread", "conversation card", "세션 전체 대화나 사건 카드 고르기", () => { if (needSession()) openPicker("conversations"); }),
 			command("답변", "answers", "history", "이 대화에서 저장된 답변 다시 보기", () => { if (needSession()) openPicker("answers"); }),
+			command("자세히", "details", "expand more", "현재 답변의 자세한 내용을 펼치거나 접기", () => { if (needSession()) toggleDetails(); }),
+			command("근거", "evidence", "source citation 원문", "현재 답변이 인용한 원문과 앞뒤 기록 확인", () => { if (needSession()) openEvidencePicker(); }),
+			command("복습", "review", "glossary terms 배운 내용 용어", "배운 용어를 검색하고 관련 문답 다시 보기", openReview),
 			command("즐겨찾기", "favorite", "star bookmark", "지금 보는 대화를 즐겨찾기에 넣거나 빼기", () => { if (needSession()) void toggleFavorite(state.thread, state.focus); }),
 			command("설정", "settings", "config model depth profile", "설명 깊이, 모델, 미리 설명, 프로필", () => openPicker("settings")),
 			command("새로고침", "refresh", "reload", "목록과 대화를 다시 불러오고 끊긴 설명에 다시 연결", rejoinOrRefresh),
@@ -1160,6 +1355,8 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		state.focus = null;
 		state.thread = "";
 		state.selectedAnswer = null;
+		state.panel = null;
+		state.evidence = null;
 		state.settling = null;
 		state.purpose = "ask";
 		state.liveNotice = "";
@@ -1204,6 +1401,9 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		state.cards = [];
 		state.cardKeys.clear();
 		state.selectedAnswer = null;
+		state.panel = null;
+		state.evidence = null;
+		state.wiki = null;
 		inform(`프로필을 ${profileName(profile)} 으로 바꿨어요.`);
 		if (state.session) await switchSession(state.session, { pick: false });
 		else {
@@ -1530,6 +1730,8 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 				return;
 			case "escape": {
 				if (state.picker) { pickerKey(event); return; }
+				if (state.panel?.kind === "term") { state.panel = null; openPicker("review"); return; }
+				if (state.evidence) { state.evidence = null; openPicker("conversations"); return; }
 				const completion = activeCompletion();
 				if (completion) { state.completion.dismissed = currentDraft().text; scheduleRender(); }
 				else if (state.purpose === "steer") { state.purpose = "ask"; scheduleRender(); }

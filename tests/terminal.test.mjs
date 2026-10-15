@@ -420,6 +420,17 @@ test("commands show Korean and English names and either name runs the command", 
 	await ui.finished;
 });
 
+test("review command opens the searchable glossary selector without calling the model", async (t) => {
+	const f = await fixture(t);
+	const ui = await terminal(t, f.address);
+	await ui.key("/review");
+	assert.match(ui.screen, /\/복습 \(review\)/, ui.screen);
+	await ui.key("\r");
+	await until(() => ui.screen.includes("배운 내용 다시보기"));
+	assert.match(ui.screen, /용어 사전|아직 모인 용어가 없어요/, ui.screen);
+	assert.equal((await f.calls()).filter((call) => call.pid).length, 0);
+});
+
 test("a leading @ # $ opens its selector instead of entering the draft, and a leading space keeps it literal", async (t) => {
 	const f = await fixture(t);
 	const ui = await terminal(t, f.address);

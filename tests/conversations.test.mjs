@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 process.env.DOCENT_HOME = await mkdtemp(join(tmpdir(), "docent-conversations-test-"));
 process.env.TYPESAFE_API_KEY = "";
-const { answerFocus, cardDisplay, cardsPayload, conversationList, excerpt, threadRows } = await import("../app/conversations.mjs");
+const { DOMAINS, EXPLAIN_ACTIONS, answerFocus, answerMeta, cardDisplay, cardsPayload, conversationList, excerpt, sourceLabel, threadRows } = await import("../app/conversations.mjs");
 const { threadKey, threadOf, withThreads } = await import("../app/thread.mjs");
 const { focusOfEvent } = await import("../app/dialogue.mjs");
 const { createAsk } = await import("../app/ask.mjs");
@@ -182,4 +182,11 @@ test("each conversation option carries the last answer of its thread", () => {
 	const list = conversationList(rows, [{ thread: "t1", focus: { label: "카드", text: "본문" } }]);
 	assert.equal(list.find((option) => option.thread === "t1").answer.headline, "마지막 답");
 	assert.equal(list.find((option) => option.kind === "all").answer, null);
+});
+
+test("shared web and terminal presentation helpers keep modes, model source, and citations readable", () => {
+	assert.equal(DOMAINS.frontend, "프론트엔드");
+	assert.deepEqual(EXPLAIN_ACTIONS.map((action) => action.name), [["쉽게", "simple"], ["10초", "quick"], ["맥락", "context"]]);
+	assert.equal(answerMeta({ difficulty: "EASY", difficultySource: "question", model: "fixture/other", modelSource: "session", ms: 2400 }), "설명 모드 EASY (바로 질문), 요청 모델: fixture/other (세션 모델), 2초 걸림");
+	assert.match(sourceLabel({ role: "assistant", agent: "scout", timestamp: "2026-10-12T01:02:00Z" }), /^서브에이전트 scout의 에이전트가 쓴 메시지 \(/);
 });
