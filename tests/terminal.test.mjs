@@ -214,6 +214,9 @@ test("typing a letter rewrites only the changed rows, and the real cursor follow
 	const f = await fixture(t);
 	const ui = await terminal(t, f.address);
 	const lineAt = () => ui.screen.split(/\r?\n/)[ui.cursor.row - 1];
+	// 시작 직후의 기록 불러오기, 버전 확인이 끝나 화면이 멈춘 뒤에 잰다. 그 프레임이 글자 프레임과 겹치면 줄 수가 늘어난다.
+	await until(() => !ui.screen.includes("불러오는 중"));
+	for (let still = 0, last = -1; still < 3;) { await new Promise((done) => setTimeout(done, 40)); const now = ui.screen.length + (ui.patchedRows ?? -1); still = now === last ? still + 1 : 0; last = now; }
 	await ui.key("가");
 	assert.ok(ui.patchedRows !== null && ui.patchedRows <= 2, `expected a partial update, got ${ui.patchedRows} rows`);
 	assert.ok(ui.cursor.visible, "the cursor must stay visible so the IME can attach its composition to it");
