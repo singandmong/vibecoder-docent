@@ -2,6 +2,11 @@
 
 형식: [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/). 버전은 [SemVer](https://semver.org/lang/ko/). 0.x 동안은 minor 가 새 기능, patch 가 고침.
 
+## [0.29.2] — 2026-10-18
+
+### 변경
+- Bun 1.4에서 터미널과 서버가 동작함을 확인해 README와 도움말에 적음. 지원 기준은 그대로 Node. CI에 Bun 작업을 추가해 테스트 파일을 파일별로 따로 돌림.
+
 ## [0.29.1] — 2026-10-15
 
 ### 고침

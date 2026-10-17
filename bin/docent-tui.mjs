@@ -25,6 +25,7 @@ const HELP = [
 	"한글 입력이 어긋나면 DOCENT_HARDWARE_CURSOR=0 으로 진짜 커서를 숨길 수 있어요.",
 	"마우스: 휠 스크롤(한 칸에 3줄), 클릭으로 선택창 항목 고르기와 입력창 커서 옮기기, 끌어서 복사, 두 번 눌러 낱말 복사.",
 	"터미널(Herdr)의 글자 선택이 필요하면 /마우스 로 끄거나 DOCENT_MOUSE=0 으로 시작하세요.",
+	"Bun 으로도 실행돼요: bun bin/docent-tui.mjs (기본과 지원 기준은 Node).",
 ].join("\n");
 
 function usageError(message) {
