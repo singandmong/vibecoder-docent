@@ -9,10 +9,13 @@ import { createHerdrReporter } from "./terminal-herdr.mjs";
 import { filterItems, renderSelector, withCaret } from "./terminal-select.mjs";
 import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { highlightRow, indexAtColumn, rowRange, selectedText, wordRange } from "./terminal-mouse.mjs";
 
 const ESC = "\u001b[";
 const TITLE = "바이브코더 도슨트";
+/** 이 터미널 클라이언트의 버전. 서버가 이보다 새 버전이면 /재시작 을 권한다 (ADR 0072). */
+const CLIENT_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const CATEGORY = { question: "질문", result: "작업 결과", plan: "계획" };
 const profileName = (profile) => profile?.name || profile?.id || "기본 프로필";
 const selectedProfileId = (profile) => profile?.id || "default";
@@ -142,6 +145,8 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 	let lastMaxScroll = 0;
 	let historyGeneration = 0;
 	let sessionGeneration = 0;
+	let restartRequested = false;
+	let serverVersion = null; // 마지막으로 확인한 서버 버전
 	let resolveFinished;
 	const finished = new Promise((resolve) => { resolveFinished = resolve; });
 
@@ -1070,6 +1075,8 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			command("즐겨찾기", "favorite", "star bookmark", "지금 보는 대화를 즐겨찾기에 넣거나 빼기", () => { if (needSession()) void toggleFavorite(state.thread, state.focus); }),
 			command("설정", "settings", "config model depth profile", "설명 깊이, 모델, 미리 설명, 프로필", () => openPicker("settings")),
 			command("새로고침", "refresh", "reload", "목록과 대화를 다시 불러오고 끊긴 설명에 다시 연결", rejoinOrRefresh),
+			command("업데이트", "update", "upgrade version 버전", "GitHub 의 새 버전을 받아 서버에 설치하고 이 터미널도 새 버전으로 다시 열기", () => void runUpdate()),
+			command("재시작", "restart", "relaunch 다시", serverVersion && serverVersion !== CLIENT_VERSION ? `새 버전 v${serverVersion} 으로 이 터미널을 다시 열기` : "이 터미널을 다시 열기(같은 세션)", requestRestart),
 			command("마우스", "mouse", "wheel click select", mouse.enabled ? "마우스 끄기: 터미널의 글자 선택과 스크롤을 씀" : "마우스 켜기: 휠 스크롤, 클릭 선택, 끌어서 복사", () => setMouse(!mouse.enabled)),
 		];
 		if (client.active) items.push(
@@ -1313,6 +1320,7 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		if (change.type === "live-status") {
 			if (change.status === "open") {
 				if (state.liveConnection) { state.liveNotice = ""; state.liveConnection = false; scheduleRender(); }
+				void refreshServerVersion();
 				return;
 			}
 			state.liveConnection = true;
@@ -1592,6 +1600,45 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		inform("대화 기록을 새로 불러오는 중이에요.");
 	}
 
+	/** 서버 버전을 다시 확인한다. 서버가 이 클라이언트보다 새 버전이면 알림 줄에 /재시작 을 권한다. */
+	async function refreshServerVersion() {
+		try {
+			const { version } = await api.health();
+			if (!state.running || typeof version !== "string") return;
+			serverVersion = version;
+			if (version !== CLIENT_VERSION) inform(`서버는 v${version}, 이 터미널은 v${CLIENT_VERSION}이에요. /재시작 으로 새 버전을 열어요.`);
+		} catch { /* 연결 문제는 실시간 연결 안내가 알린다. */ }
+	}
+
+	/** 이 터미널을 닫고 같은 명령을 새 파일로 다시 연다. 열린 세션은 이어서 연다. 실제 실행은 bin/docent-tui.mjs 가 한다. */
+	function requestRestart() {
+		restartRequested = true;
+		exit();
+	}
+
+	/** /업데이트: 서버가 새 버전을 받아 설치하고 다시 켜지면, 이 터미널도 새 버전으로 다시 연다. */
+	async function runUpdate() {
+		inform("새 버전을 확인하는 중이에요.");
+		let info;
+		try { info = await api.updateInfo(true); } catch (error) { failNotice(`새 버전을 확인하지 못했어요: ${reason(error)}`); return; }
+		if (!info.available) {
+			if (serverVersion && serverVersion !== CLIENT_VERSION) { inform(`서버는 이미 v${serverVersion}이에요. 이 터미널을 새 버전으로 다시 열어요.`); requestRestart(); }
+			else succeed(`최신 버전이에요 (v${info.current}).`);
+			return;
+		}
+		if (!info.canInstall) { failNotice(`v${info.latest}가 나왔지만 여기서 설치할 수 없어요: ${info.reason ?? "이유를 알 수 없어요"}`); return; }
+		inform(`v${info.latest}를 내려받아 설치하는 중이에요. 1분쯤 걸려요.`);
+		let result;
+		try { result = await api.updateApply(); } catch (error) { failNotice(`업데이트하지 못했어요: ${reason(error)}`); return; }
+		if (!result.updated) { succeed(`최신 버전이에요 (v${result.current}).`); return; }
+		inform(`v${result.to}를 설치했어요. 서버가 다시 켜지기를 기다리는 중이에요.`);
+		for (let i = 0; i < 90 && state.running; i++) {
+			await new Promise((done) => setTimeout(done, 1000));
+			try { if ((await api.health()).version === result.to) { requestRestart(); return; } } catch { /* 다시 켜지는 중 */ }
+		}
+		if (state.running) failNotice("설치는 끝났지만 서버가 90초 안에 다시 켜지지 않았어요. docent start 로 켠 뒤 /재시작 하세요.");
+	}
+
 	function scroll(delta, followBottom = false) {
 		state.followSelection = false;
 		state.followBottom = followBottom;
@@ -1857,7 +1904,9 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 			void switchSession(listed ?? { id: initialSession, provider: initialSession.split(":")[0], title: "지정한 세션" });
 		} else openPicker("sessions");
 		render();
+		void refreshServerVersion();
 		await finished;
+		return { restart: restartRequested, session: state.session?.id ?? null };
 	} finally {
 		input.close();
 		restoreTerminal();

@@ -29,6 +29,7 @@ import { displayOf, parseFocus } from "./dialogue.mjs";
 import { createRunner } from "./runner.mjs";
 import { createAsk } from "./ask.mjs";
 import { prefetchHub } from "./prefetch.mjs";
+import { checkLatest, installPrefix, installRelease, scheduleRestart } from "./update.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 // 화면 하단 정보 줄에 보여 줄 버전. 설치 패키지와 저장소 모두 package.json 이 함께 온다.
@@ -203,6 +204,52 @@ async function evidenceFor(sessionId, ref, profileId) {
 	return { available: false, message: "원본 전사가 없거나 변경되어 원문을 열 수 없어요. 아래는 이 프로필의 답변에 저장된 당시 발췌예요.", selected: { id: saved.id, text: saved.excerpt, role: saved.role, timestamp: saved.timestamp, agent: saved.agent }, before: [], after: [] };
 }
 
+// 새 버전 확인과 설치 (ADR 0072). 설치는 서버를 연 이 컴퓨터에서, 이 컴퓨터의 주소로 온 요청만 한다.
+// 테일스케일이나 다른 기기에서 온 요청, 다른 사이트가 브라우저로 보낸 요청(Origin)은 거절한다.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+function localRequest(req) {
+	const address = req.socket.remoteAddress ?? "";
+	const fromHere = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(address);
+	const host = String(req.headers.host ?? "").replace(/:\d+$/, "");
+	let originOk = true;
+	if (req.headers.origin) {
+		try { originOk = LOOPBACK_HOSTS.has(new URL(req.headers.origin).hostname); } catch { originOk = false; }
+	}
+	return fromHere && LOOPBACK_HOSTS.has(host) && originOk;
+}
+const latestRelease = (fresh) => checkLatest({ current: VERSION, fresh });
+const installBlock = async (req) => {
+	if (!localRequest(req)) return "업데이트는 서버를 켠 컴퓨터에서 이 컴퓨터의 주소로 연 화면에서만 할 수 있어요.";
+	if (!(await installPrefix())) return "npm 전역으로 설치한 도슨트만 업데이트할 수 있어요. 저장소에서 실행 중이면 git pull 로, macOS 앱은 앱을 다시 설치하세요.";
+	return null;
+};
+let updating = false;
+
+async function updateStatus(req, fresh) {
+	const latest = await latestRelease(fresh);
+	const block = latest.available ? await installBlock(req) : null;
+	return { ...latest, url: undefined, sha256: undefined, canInstall: latest.installable && !block, ...(block || latest.reason ? { reason: block ?? latest.reason } : {}) };
+}
+
+async function applyUpdate(req) {
+	if (updating) throw httpError(409, "이미 업데이트하고 있어요.");
+	const block = await installBlock(req);
+	if (block) throw httpError(403, block);
+	updating = true;
+	try {
+		const latest = await latestRelease(true);
+		if (!latest.available) return { updated: false, current: VERSION, latest: latest.latest };
+		if (!latest.installable) throw httpError(409, latest.reason);
+		await installRelease({ url: latest.url, sha256: latest.sha256, prefix: await installPrefix() });
+		// 응답을 보낸 뒤 이 서버를 끝낸다. 관리자(launchd 등)가 없으면 떨어진 프로세스가 새 파일로 다시 켠다.
+		const restart = scheduleRestart({ port: PORT });
+		setTimeout(() => void shutdown(), 400).unref?.();
+		return { updated: true, from: VERSION, to: latest.latest, restart };
+	} finally {
+		updating = false;
+	}
+}
+
 const handler = async (req, res) => {
 	const url = new URL(req.url, "http://localhost");
 	// Personal records must never enter browser/proxy caches, including PWA use.
@@ -229,6 +276,11 @@ const handler = async (req, res) => {
 			const input = await body(req);
 			if (typeof input.tailscale !== "boolean") throw httpError(400, "tailscale 는 참/거짓이어야 해요.");
 			return json(res, 200, await setTailscaleShare(input.tailscale));
+		}
+		if (req.method === "GET" && url.pathname === "/api/update") return json(res, 200, await updateStatus(req, url.searchParams.get("fresh") === "1"));
+		if (req.method === "POST" && url.pathname === "/api/update") {
+			if ((await body(req)).apply !== true) throw httpError(400, "apply 는 참이어야 해요.");
+			return json(res, 200, await applyUpdate(req));
 		}
 		if (req.method === "GET" && url.pathname === "/api/models") return json(res, 200, await modelCatalog());
 		if (req.method === "GET" && url.pathname === "/api/profiles") return json(res, 200, await profiles());

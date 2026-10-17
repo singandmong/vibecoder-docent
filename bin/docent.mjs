@@ -69,6 +69,62 @@ if (args[0] === "start" || args[0] === "stop") {
 		process.exit(1);
 	}
 }
+if (args[0] === "update") {
+	const rest = args.slice(1);
+	const unknown = rest.find((arg, i) => arg !== "--check" && arg !== "--port" && rest[i - 1] !== "--port");
+	if (unknown) {
+		console.error(`docent update: 알 수 없는 옵션이에요: ${unknown}\nusage: docent update [--check] [--port N]`);
+		process.exit(2);
+	}
+	const { readFileSync } = await import("node:fs");
+	const { config } = await import("../app/store.mjs");
+	const { checkLatest, installPrefix, installRelease } = await import("../app/update.mjs");
+	const { serverAt } = await import("../app/server-process.mjs");
+	const current = JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../package.json"), "utf8")).version;
+	const port = Number(rest.includes("--port") ? rest[rest.indexOf("--port") + 1] : process.env.DOCENT_PORT ?? (await config()).port ?? 4747);
+	if (!Number.isInteger(port) || port < 1 || port > 65535) {
+		console.error("docent update: 포트는 1에서 65535 사이 정수여야 해요.");
+		process.exit(2);
+	}
+	try {
+		const info = await checkLatest({ current, fresh: true });
+		if (!info.available) {
+			console.log(`docent: 최신 버전이에요 (v${current})`);
+			process.exit(0);
+		}
+		console.log(`docent: 새 버전이 있어요 v${current} → v${info.latest}`);
+		if (rest.includes("--check")) process.exit(0);
+		if (!info.installable) throw new Error(info.reason);
+		const running = await serverAt(port);
+		if (running) {
+			// 켜 둔 서버가 직접 설치하고 자기 옵션 그대로 다시 켜진다.
+			const response = await fetch(`http://127.0.0.1:${port}/api/update`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ apply: true }), signal: AbortSignal.timeout(240_000) });
+			const result = await response.json().catch(() => ({}));
+			if (!response.ok) throw new Error(result.error || `서버가 업데이트하지 못했어요 (HTTP ${response.status}).`);
+			process.stdout.write("docent: 설치했어요. 서버가 다시 켜지기를 기다려요");
+			const deadline = Date.now() + 60_000;
+			let now = null;
+			while (Date.now() < deadline) {
+				await new Promise((done) => setTimeout(done, 1000));
+				process.stdout.write(".");
+				now = await serverAt(port);
+				if (now?.version === result.to) break;
+			}
+			console.log("");
+			if (now?.version !== result.to) throw new Error("설치는 끝났지만 새 서버가 60초 안에 켜지지 않았어요. docent start 로 켜세요.");
+			console.log(`docent: v${result.to} 서버가 켜졌어요. 열려 있는 터미널은 /재시작, 웹은 새로고침하세요.`);
+		} else {
+			const prefix = await installPrefix();
+			if (!prefix) throw new Error("npm 전역으로 설치한 도슨트만 업데이트할 수 있어요. 저장소에서 실행 중이면 git pull 하세요.");
+			await installRelease({ url: info.url, sha256: info.sha256, prefix });
+			console.log(`docent: v${info.latest} 를 설치했어요. 켜 둔 서버가 없어 다시 켤 것은 없어요.`);
+		}
+		process.exit(0);
+	} catch (error) {
+		console.error(`docent update: ${error.message}`);
+		process.exit(1);
+	}
+}
 if (args[0] === "herdr") {
 	const rest = args.slice(1);
 	const value = (name) => (rest.includes(name) ? rest[rest.indexOf(name) + 1] : undefined);
@@ -117,6 +173,7 @@ if (args.includes("-h") || args.includes("--help")) {
 			"usage: docent [--no-open] [--port N] [--host <ip|tailscale>] [--peer 이름=URL ...]",
 			"       docent start [--port N] [--host ...] [--peer ...]   서버를 백그라운드로 켬. 기록은 ~/.docent/server.log",
 			"       docent stop [--port N]   백그라운드로 켠 서버를 끔",
+			"       docent update [--check] [--port N]   GitHub 릴리스의 새 버전을 확인하고 설치. 켜 둔 서버는 새 파일로 다시 켜짐",
 			"       docent doctor [--json] [--probe] [--port N]   설치 상태 점검. --probe 는 모델을 한 번 불러 로그인까지 확인",
 			"       docent herdr [--split] [--session <id> | --session-file <경로>]   이 터미널 창에서 바로 도슨트 TUI 를 엶. --split 이면 Herdr 창 오른쪽에 띄움",
 			"       docent install-omp [--project]   omp 서브에이전트 정의와 /docent 명령 설치. 코어나 확장을 고친 뒤에도 다시 실행",

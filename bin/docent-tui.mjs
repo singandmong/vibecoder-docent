@@ -20,6 +20,7 @@ const HELP = [
 	"",
 	"단축키: Ctrl+P 세션 | Ctrl+T 대화 | Ctrl+O 저장된 답변 | Ctrl+G 프로필 | Ctrl+F 즐겨찾기",
 	"/자세히 답변 세부 내용 | /근거 답변 인용 원문 | /복습 배운 용어 검색",
+	"/업데이트 새 버전 받아 설치 후 이 터미널도 새 버전으로 | /재시작 같은 세션으로 다시 열기(서버가 먼저 업데이트됐을 때)",
 	"Ctrl+R 같은 요청 다시 연결, 새로고침 | Ctrl+S 바로잡기 전환 | Ctrl+J 줄바꿈",
 	"붙여넣기로 여러 줄을 입력할 수 있고 q, i, ! 같은 글자도 그대로 입력돼요.",
 	"한글 입력이 어긋나면 DOCENT_HARDWARE_CURSOR=0 으로 진짜 커서를 숨길 수 있어요.",
@@ -70,7 +71,15 @@ if (args.includes("-h") || args.includes("--help")) {
 	}
 	if (process.exitCode !== 2) {
 		try {
-			await runTerminal({ baseUrl, initialSession });
+			const result = await runTerminal({ baseUrl, initialSession });
+			if (result?.restart) {
+				// /재시작, /업데이트: 같은 실행 파일을 새로 띄운다. npm 이 파일을 바꿨으면 새 버전이 뜬다. 같은 서버와 세션으로 이어 연다.
+				const { spawn } = await import("node:child_process");
+				const nextArgs = [process.argv[1], "--url", baseUrl, ...(result.session ? ["--session", result.session] : [])];
+				const child = spawn(process.execPath, nextArgs, { stdio: "inherit", env: process.env });
+				const code = await new Promise((done) => child.on("exit", (exitCode, signal) => done(signal ? 1 : exitCode ?? 0)));
+				process.exitCode = code;
+			}
 		} catch (error) {
 			console.error(`docent-tui: ${terminalSafeText(error?.message || String(error))}`);
 			process.exitCode = 1;

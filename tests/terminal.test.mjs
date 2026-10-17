@@ -420,6 +420,15 @@ test("commands show Korean and English names and either name runs the command", 
 	await ui.finished;
 });
 
+test("/restart closes the terminal and asks the launcher to reopen the same session", async (t) => {
+	const f = await fixture(t);
+	const ui = await terminal(t, f.address);
+	await ui.key("/restart");
+	assert.match(ui.screen, /\/재시작 \(restart\)/);
+	ui.send("\r");
+	assert.deepEqual(await ui.finished, { restart: true, session: f.sessionId });
+});
+
 test("review command opens the searchable glossary selector without calling the model", async (t) => {
 	const f = await fixture(t);
 	const ui = await terminal(t, f.address);

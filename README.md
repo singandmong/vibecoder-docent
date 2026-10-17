@@ -56,6 +56,16 @@ bunx github:singandmong/vibecoder-docent   # bun
 
 Windows에서는 PowerShell이나 명령 프롬프트에서 `docent`를 실행하면 기본 브라우저로 열린다. PowerShell의 스크립트 실행이 막혀 있으면(`UnauthorizedAccess`) `docent.cmd`, `docent-tui.cmd`처럼 `.cmd`를 붙여 실행한다.
 
+## 업데이트
+
+새 버전은 GitHub 릴리스에서 받는다. 어느 화면에서 해도 서버가 파일을 내려받아 sha256을 확인하고, 지금 설치된 위치에 설치한 뒤 새 파일로 다시 켜진다 (ADR 0072).
+
+- 웹·PWA: 설정 > 연결 > **업데이트**에서 "새 버전 확인", "설치하고 다시 시작". 서버가 화면보다 새 버전이 되면 왼쪽 아래에 "새 버전 적용" 버튼이 생긴다(누르면 새로고침).
+- 터미널: `/업데이트`(`/update`)는 설치 뒤 이 터미널도 같은 세션으로 새 버전을 다시 연다. 서버가 먼저 바뀌었으면 `/재시작`(`/restart`).
+- CLI: `docent update`(확인만은 `docent update --check`).
+
+설치는 서버를 켠 컴퓨터에서 `127.0.0.1`로 연 화면이나 명령에서만 된다. 다른 기기(테일스케일로 연 휴대폰 등)는 새 버전 알림만 보인다. `npm install -g`로 설치한 도슨트만 이렇게 올릴 수 있고, 저장소 실행은 `git pull`, macOS 앱은 앱을 다시 설치한다. omp 확장이 바뀐 릴리스는 CHANGELOG에 적힌 대로 `docent install-omp`를 다시 실행한다.
+
 ## 실행
 
 ```sh

@@ -2,6 +2,15 @@
 
 형식: [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/). 버전은 [SemVer](https://semver.org/lang/ko/). 0.x 동안은 minor 가 새 기능, patch 가 고침.
 
+## [0.30.0] — 2026-10-18
+
+### 추가
+- 새 버전 받기 (ADR 0072). GitHub 최신 릴리스를 확인하고, 서버가 파일을 내려받아 sha256을 맞춘 뒤 지금 설치된 위치에 설치하고 새 파일로 다시 켜짐. launchd 같은 관리자가 있으면 그쪽이, 없으면 `docent start`로 다시 켬.
+  - 웹·PWA: 설정 > 연결 > 업데이트("새 버전 확인", "설치하고 다시 시작"). 서버가 화면보다 새 버전이면 왼쪽 아래에 "새 버전 적용" 버튼.
+  - 터미널: `/업데이트 (update)`는 설치 뒤 같은 세션으로 이 터미널도 새 버전으로 다시 엶. `/재시작 (restart)`. 서버가 더 새 버전이면 알림 줄에서 알려 줌.
+  - CLI: `docent update [--check]`.
+- `GET /api/update`, `POST /api/update {apply:true}`. 설치는 이 컴퓨터(loopback)에서 온 요청만 받음.
+
 ## [0.29.2] — 2026-10-18
 
 ### 변경

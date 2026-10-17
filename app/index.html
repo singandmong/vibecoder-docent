@@ -464,6 +464,7 @@
   <div id="sessions"></div>
   <footer class="side-foot">
     <span class="foot-version">v__DOCENT_VERSION__</span>
+    <button id="reloadNew" class="control" type="button" hidden>새 버전 적용</button>
     <a class="foot-author" href="https://singandmong.com" target="_blank" rel="noopener" title="스튜디오 싱앤몽">foxion37, 스튜디오 싱앤몽</a>
     <a class="foot-github" href="https://github.com/singandmong/vibecoder-docent" target="_blank" rel="noopener" aria-label="GitHub 저장소" title="GitHub 저장소"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg></a>
   </footer>
@@ -618,6 +619,12 @@
       <h3>휴대폰에 설치하기</h3>
       <p id="installHelp" class="notice"></p>
       <button id="installApp" class="control" type="button" hidden>홈 화면에 설치</button>
+    </section>
+    <section class="set-card">
+      <h3>업데이트</h3>
+      <p id="updateStatus" class="notice" role="status">지금 v__DOCENT_VERSION__</p>
+      <button id="updateCheck" class="control" type="button">새 버전 확인</button>
+      <button id="updateApply" class="control" type="button" hidden>설치하고 다시 시작</button>
     </section>
   </section>
 </dialog>
@@ -1763,6 +1770,58 @@ $("#tailscaleShare").onchange = async () => {
     box.disabled = false;
   }
 };
+/** 업데이트 (ADR 0072): GitHub 릴리스의 새 버전을 확인하고, 서버가 설치한 뒤 다시 켜지면 이 화면도 새로고침한다. */
+const PAGE_VERSION = "__DOCENT_VERSION__";
+const sleepMs = (ms) => new Promise((done) => setTimeout(done, ms));
+async function waitForVersion(version, status) {
+  for (let i = 0; i < 90; i++) {
+    await sleepMs(1000);
+    try { if ((await server.health()).version === version) return true; } catch { status.textContent = "서버가 다시 켜지기를 기다리는 중이에요."; }
+  }
+  return false;
+}
+$("#updateCheck").onclick = async () => {
+  const check = $("#updateCheck"), apply = $("#updateApply"), status = $("#updateStatus");
+  check.disabled = true; apply.hidden = true;
+  status.textContent = "새 버전을 확인하는 중이에요.";
+  try {
+    const info = await server.updateInfo(true);
+    if (!info.available) { status.textContent = `최신 버전이에요 (v${info.current}).`; return; }
+    status.textContent = info.canInstall ? `v${info.latest} 로 올릴 수 있어요 (지금 v${info.current}).` : `v${info.latest} 가 나왔어요 (지금 v${info.current}). ${info.reason ?? ""}`;
+    apply.hidden = !info.canInstall;
+    apply.dataset.version = info.latest;
+  } catch (e) {
+    status.textContent = `확인하지 못했어요: ${e.message}`;
+  } finally {
+    check.disabled = false;
+  }
+};
+$("#updateApply").onclick = async () => {
+  const check = $("#updateCheck"), apply = $("#updateApply"), status = $("#updateStatus");
+  check.disabled = apply.disabled = true;
+  status.textContent = "내려받아 설치하는 중이에요. 1분쯤 걸려요. 설치가 끝나면 서버가 다시 켜지고 이 화면이 새로고침돼요.";
+  try {
+    const result = await server.updateApply();
+    if (!result.updated) { status.textContent = `이미 최신 버전이에요 (v${result.current}).`; return; }
+    status.textContent = `v${result.to} 를 설치했어요. 서버가 다시 켜지기를 기다리는 중이에요.`;
+    if (await waitForVersion(result.to, status)) location.reload();
+    else status.textContent = `설치는 끝났지만 서버가 90초 안에 다시 켜지지 않았어요. 서버를 켠 컴퓨터에서 docent start 를 실행하세요.`;
+  } catch (e) {
+    status.textContent = `업데이트하지 못했어요: ${e.message}`;
+  } finally {
+    check.disabled = apply.disabled = false;
+  }
+};
+$("#reloadNew").onclick = () => location.reload();
+/** 서버가 이 화면보다 새 버전이면 새로고침 버튼을 보인다. 다른 기기에서 서버가 업데이트됐을 때도 알아챈다. */
+async function checkServerVersion() {
+  try {
+    const { version } = await server.health();
+    const stale = typeof version === "string" && version !== PAGE_VERSION;
+    $("#reloadNew").hidden = !stale;
+    if (stale) $("#reloadNew").textContent = `새 버전 v${version} 적용`;
+  } catch { /* 서버가 꺼진 동안은 표시를 바꾸지 않는다. */ }
+}
 
 /** 설정창 탭: 모양(글자 크기·테마), 설명, 모델, 연결. 방향 키로도 옮겨 간다. */
 const SETTINGS_TAB_IDS = ["tabLook", "tabExplain", "tabModel", "tabLink"];
@@ -2458,7 +2517,7 @@ async function initialize() {
   renderSessions();
   if (!current && profilesReady) { const s = sessions.find((entry) => entry.id === saved("session")); if (s) await select(s); }
 }
-initialize(); setInterval(() => { renderRefreshed(); loadSessions(); loadPrefetch(); }, 15000);
+initialize(); setInterval(() => { renderRefreshed(); loadSessions(); loadPrefetch(); checkServerVersion(); }, 15000);
 </script>
 </body>
 </html>

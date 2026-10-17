@@ -87,6 +87,12 @@ export class HttpTransport {
 	models(signal) { return this.json("/api/models", { signal }); }
 	/** 이 세션의 모델(모델을 고르지 않았을 때 설명에 쓰임). {raw, model}: model 이 null 이면 omp 기본 모델 */
 	sessionModel(sessionId, signal) { return this.json(`/api/session-model?${new URLSearchParams({ id: sessionId })}`, { signal }); }
+	/** 서버가 알려 주는 제품, 버전, 프로세스 번호. 연결 확인과 새 버전 적용 확인에 쓴다. */
+	health(signal) { return this.json("/api/health", { signal }); }
+	/** 새 버전 확인(ADR 0072). canInstall 이 거짓이면 reason 에 이유가 있다. */
+	updateInfo(fresh = false, signal) { return this.json(`/api/update${fresh ? "?fresh=1" : ""}`, { signal }); }
+	/** 새 버전 설치. 응답 뒤 서버가 새 파일로 다시 켜진다. */
+	updateApply() { return this.json("/api/update", { method: "POST", body: { apply: true } }); }
 	evidence(sessionId, ref, profileId = "default", signal) {
 		const query = new URLSearchParams({ id: sessionId, ref, profileId });
 		return this.json(`/api/evidence?${query}`, { signal });
