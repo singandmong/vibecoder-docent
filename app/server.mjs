@@ -139,6 +139,10 @@ function extractKeywords(profileId) {
 }
 
 async function body(req) {
+	// 브라우저가 프리플라이트 없이 보낼 수 있는 형식(text/plain, form)은 받지 않는다. 그 형식이 열려 있으면
+	// 다른 사이트의 페이지가 이 서버의 API를 그대로 부를 수 있다(CSRF). 우리 화면·터미널·CLI는 모두 JSON으로 보낸다.
+	const type = String(req.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+	if (type !== "application/json") throw httpError(415, "application/json 요청만 받아요.");
 	let value;
 	try {
 		value = JSON.parse(await readBody(req));
@@ -159,6 +163,9 @@ const hub = prefetchHub({
 });
 
 const NDJSON = "application/x-ndjson";
+// 열어 둘 수 있는 실시간(SSE) 연결 수 상한 (ADR 0075). 넘으면 스트림을 열기 전에 503 으로 답한다.
+const MAX_LIVE_CONNECTIONS = 128;
+const liveConnections = new Set();
 
 async function respondAsk(req, res, input) {
 	const opened = await asks.open(input);
@@ -207,6 +214,32 @@ async function evidenceFor(sessionId, ref, profileId) {
 // 새 버전 확인과 설치 (ADR 0072). 설치는 서버를 연 이 컴퓨터에서, 이 컴퓨터의 주소로 온 요청만 한다.
 // 테일스케일이나 다른 기기에서 온 요청, 다른 사이트가 브라우저로 보낸 요청(Origin)은 거절한다.
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+/** 사설·테일넷 주소인가. 공인 이름으로 온 재바인딩 요청을 막는 데 쓴다. */
+function privateAddress(value) {
+	if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
+		const [a, b] = value.split(".").map(Number);
+		return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254);
+	}
+	const lower = value.toLowerCase();
+	return lower === "::1" || lower.startsWith("fc") || lower.startsWith("fd") || lower.startsWith("fe80:");
+}
+
+/**
+ * DNS 재바인딩 방어 (ADR 0075). 요청의 Host 가 이 컴퓨터의 주소나 우리가 아는 이름일 때만 받는다.
+ * 공인 도메인을 이 서버로 돌린 뒤 그 출처에서 API 를 읽는 것을 막는다.
+ */
+function knownHost(value) {
+	const raw = String(value ?? "").trim().toLowerCase();
+	if (!raw) return false;
+	const bare = raw.startsWith("[") ? raw.slice(1, raw.includes("]") ? raw.indexOf("]") : undefined) : raw.replace(/:\d+$/, "");
+	if (LOOPBACK_HOSTS.has(bare) || bare === "::1") return true;
+	if (bare === HOST.toLowerCase() || bare === String(CONFIG.host ?? "").toLowerCase()) return true;
+	// 테일스케일 이름(ts.net), 같은 사설망의 mDNS 이름(.local)은 우리가 아는 이름이다.
+	if (bare.endsWith(".ts.net") || bare.endsWith(".local")) return true;
+	return privateAddress(bare);
+}
+
 function localRequest(req) {
 	const address = req.socket.remoteAddress ?? "";
 	const fromHere = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(address);
@@ -254,6 +287,10 @@ const handler = async (req, res) => {
 	const url = new URL(req.url, "http://localhost");
 	// Personal records must never enter browser/proxy caches, including PWA use.
 	if (url.pathname.startsWith("/api/")) res.setHeader("cache-control", "no-store");
+	// 다른 사이트가 DNS 를 자기 도메인으로 돌린 뒤 이 컴퓨터로 요청을 보내는 것을 막는다(ADR 0075).
+	if (!knownHost(req.headers.host)) return json(res, 403, { error: "이 주소로는 열 수 없어요. 127.0.0.1 이나 이 컴퓨터의 테일스케일 주소로 열어 주세요." });
+	// 다른 사이트의 페이지가 보낸 요청은 받지 않는다(CSRF). 브라우저가 붙이는 표시라 Host·Content-Type 과 별개로 한 겹 더 막는다.
+	if (String(req.headers["sec-fetch-site"] ?? "").toLowerCase() === "cross-site") return json(res, 403, { error: "다른 사이트에서 보낸 요청은 받지 않아요." });
 	try {
 		if (req.method === "GET" && url.pathname === "/api/health") return json(res, 200, { app: "vibecoder-docent", version: VERSION, pid: process.pid });
 		if (req.method === "GET" && url.pathname === "/") {
@@ -332,16 +369,20 @@ const handler = async (req, res) => {
 		if (req.method === "GET" && url.pathname === "/api/live") {
 			const id = url.searchParams.get("id") ?? "";
 			const profileId = url.searchParams.get("profileId");
-			// 모르는 세션 id, 잘못된 id 는 스트림을 열기 전에 400 으로 답한다.
-			catalog.providerOf(id);
+			// 모르는 세션 id, 잘못된 id, 구독 상한 초과는 스트림을 열기 전에 답한다 (ADR 0075).
+			if (liveConnections.size >= MAX_LIVE_CONNECTIONS) throw httpError(503, "지금은 실시간 연결이 너무 많아요. 잠시 뒤 다시 시도해 주세요.");
+			catalog.checkWatch(id);
 			if (profileId) await profile(profileId);
 			res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
 			res.write(`: jev=${jevEnabled}\n\n`);
-			const send = (ev) => res.write(`data: ${JSON.stringify(ev)}\n\n`);
+			// 연결이 끊긴 뒤의 쓰기는 무시한다. 오류가 프로세스를 끝내지 않게 한다.
+			const send = (ev) => { if (res.writableEnded || res.destroyed) return; res.write(`data: ${JSON.stringify(ev)}\n\n`); };
 			// 프로필 없이 여는 구독(다른 컴퓨터의 docent)은 미리 설명을 예약하지 않는다.
 			const stop = profileId ? hub.subscribe({ sessionId: id, profileId, send }) : catalog.watch(id, send);
-			const ping = setInterval(() => res.write(": ping\n\n"), 15_000);
+			const ping = setInterval(() => { if (!res.writableEnded && !res.destroyed) res.write(": ping\n\n"); }, 15_000);
+			liveConnections.add(req);
 			req.on("close", () => {
+				liveConnections.delete(req);
 				stop();
 				clearInterval(ping);
 			});
@@ -361,6 +402,8 @@ const handler = async (req, res) => {
 		}
 		json(res, 404, { error: "not found" });
 	} catch (e) {
+		// 스트림처럼 헤더를 이미 보낸 뒤에는 상태 코드를 바꿀 수 없다. 연결만 닫는다.
+		if (res.headersSent) { res.end(); return; }
 		json(res, e.status ?? (e.code === "ENOENT" ? 404 : e instanceof URIError ? 400 : 500), { error: String(e.message ?? e) });
 	}
 };

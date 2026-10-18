@@ -1313,7 +1313,7 @@ function renderSessions() {
   const query = $("#filter").value.trim().toLowerCase();
   const box = $("#sessions"); box.textContent = "";
   const pool = sideTab === "all" ? sessions : sessions.filter((s) => s.host === sideTab);
-  const matches = query ? pool.filter((s) => [s.title, s.repo, s.project, s.worktree, s.branch, s.recent, s.cwd, s.first, s.host, s.herdr?.label].some((value) => value?.toLowerCase().includes(query))) : pool;
+  const matches = query ? pool.filter((s) => [s.title, s.repo, s.project, s.worktree, s.branch, s.recent, s.cwd, s.first, s.host, s.herdr?.label].some((value) => String(value ?? "").toLowerCase().includes(query))) : pool;
   $("#count").textContent = matches.length;
   const limit = Math.max(sessionLimit, matches.findIndex((s) => s.id === current?.id) + 1);
   for (const s of matches.slice(0, limit)) {

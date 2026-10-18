@@ -172,6 +172,39 @@ export function sessionCatalog(providers) {
 		provider.check(sessionId);
 		return provider;
 	};
+	// 감시기는 세션마다 하나. 화면 구독과 미리 설명이 함께 쓰고, 구독이 하나도 남지 않으면 멈춘다 (ADR 0075).
+	const LIVE_PER_SESSION = 16;
+	const LIVE_TOTAL = 128;
+	const watches = new Map();
+	let live = 0;
+	/** 스트림을 열기 전에 자리가 있는지 본다. 헤더를 보낸 뒤에는 상태 코드를 바꿀 수 없어 여기서 먼저 확인한다. */
+	const checkWatch = (sessionId) => {
+		const provider = providerOf(sessionId);
+		const entry = watches.get(sessionId);
+		if ((entry?.subscribers.size ?? 0) >= LIVE_PER_SESSION || live >= LIVE_TOTAL) {
+			throw httpError(503, "지금은 이 세션을 지켜볼 수 없어요. 잠시 뒤 다시 시도해 주세요.");
+		}
+		return provider;
+	};
+	const watch = (sessionId, send) => {
+		const provider = checkWatch(sessionId);
+		let entry = watches.get(sessionId);
+		if (!entry) {
+			const subscribers = new Set();
+			entry = { subscribers, stop: provider.watch(sessionId, (ev) => { for (const fn of [...subscribers]) fn(ev); }) };
+			watches.set(sessionId, entry);
+		}
+		entry.subscribers.add(send);
+		live++;
+		let stopped = false;
+		return () => {
+			if (stopped) return;
+			stopped = true;
+			live--;
+			entry.subscribers.delete(send);
+			if (!entry.subscribers.size) { entry.stop(); watches.delete(sessionId); }
+		};
+	};
 	return {
 		providerOf,
 		async list() {
@@ -190,7 +223,8 @@ export function sessionCatalog(providers) {
 			return top.map((entry) => described.get(entry.session));
 		},
 		transcript: async (sessionId) => providerOf(sessionId).transcript(sessionId),
-		watch: (sessionId, send) => providerOf(sessionId).watch(sessionId, send),
+		watch,
+		checkWatch,
 		/** 에이전트가 알려 준 자기 세션 파일 경로 → 세션 id (docent herdr, ADR 0044). 이 컴퓨터의 제공자만 답한다. */
 		async resolve(path) {
 			const absolute = resolve(path);

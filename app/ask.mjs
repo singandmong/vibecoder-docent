@@ -3,6 +3,7 @@
 // 모델 실행은 runner 로만 한다. 운영에서는 omp 프로세스, 테스트에서는 각본대로 답하는 runner 를 넣는다.
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
+import { capacity } from "./capacity.mjs";
 import { conversationPool } from "./conversation.mjs";
 import { checkOverride, depthDecider } from "./depth.mjs";
 import { displayOf, parseCards, parseFocus, questionContext, recentDialogue, steerMessage } from "./dialogue.mjs";
@@ -21,6 +22,8 @@ import { threadOf } from "./thread.mjs";
 
 const MANUAL_GRACE_MS = 1500;
 const SOURCE_CACHE = 8;
+// 동시에 돌리는 설명 작업 수 상한 (ADR 0075). 몰려든 요청은 전사 읽기와 분야 판정 전에 순서를 기다린다.
+const MAX_JOBS = 8;
 
 /** 기다리는 동안 중단되면 CancelledError. */
 function untilOrAbort(promise, signal) {
@@ -129,6 +132,7 @@ export function createAsk({ runner, providerOf, prompts, notify }) {
 	const jobs = jobRegistry();
 	const gate = priorityGate();
 	const turns = threadTurns();
+	const slots = capacity(MAX_JOBS);
 	const sources = new Map();
 	const decideDepth = depthDecider({ runner, prompt: prompts.domains });
 
@@ -211,14 +215,19 @@ export function createAsk({ runner, providerOf, prompts, notify }) {
 		}
 	}
 
-	/** 차례를 받은 뒤 설명한다. 미리 설명은 사용자 질문이 없을 때, 같은 스레드는 앞 질문이 끝난 뒤. */
+	/** 차례를 받은 뒤 설명한다. 미리 설명은 사용자 질문이 없을 때, 같은 스레드는 앞 질문이 끝난 뒤, 전체 작업은 상한 안에서. */
 	async function run(job, input) {
 		const { profileId, id, thread } = input;
 		const endGate = job.meta.auto ? await gate.auto(profileId, job.signal) : gate.manual(profileId);
 		try {
 			const endTurn = await turns.take(`${profileId}\n${id}\n${thread}`, job.signal);
 			try {
-				return await explain(job, input);
+				const free = await slots.acquire(job.signal);
+				try {
+					return await explain(job, input);
+				} finally {
+					free();
+				}
 			} finally {
 				endTurn();
 			}
