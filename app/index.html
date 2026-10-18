@@ -1774,7 +1774,7 @@ $("#tailscaleShare").onchange = async () => {
 const PAGE_VERSION = "__DOCENT_VERSION__";
 const sleepMs = (ms) => new Promise((done) => setTimeout(done, ms));
 async function waitForVersion(version, status) {
-  for (let i = 0; i < 90; i++) {
+  for (let i = 0; i < 300; i++) {
     await sleepMs(1000);
     try { if ((await server.health()).version === version) return true; } catch { status.textContent = "서버가 다시 켜지기를 기다리는 중이에요."; }
   }
@@ -1805,7 +1805,7 @@ $("#updateApply").onclick = async () => {
     if (!result.updated) { status.textContent = `이미 최신 버전이에요 (v${result.current}).`; return; }
     status.textContent = `v${result.to} 를 설치했어요. 서버가 다시 켜지기를 기다리는 중이에요.`;
     if (await waitForVersion(result.to, status)) location.reload();
-    else status.textContent = `설치는 끝났지만 서버가 90초 안에 다시 켜지지 않았어요. 서버를 켠 컴퓨터에서 docent start 를 실행하세요.`;
+    else status.textContent = result.restart === "supervisor" ? "설치는 끝났고 서비스가 새 서버를 켜는 중이에요. 잠시 뒤 새로고침하세요." : "설치는 끝났지만 서버가 5분 안에 다시 켜지지 않았어요. 서버를 켠 컴퓨터에서 docent start 를 실행하세요.";
   } catch (e) {
     status.textContent = `업데이트하지 못했어요: ${e.message}`;
   } finally {

@@ -2,6 +2,11 @@
 
 형식: [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/). 버전은 [SemVer](https://semver.org/lang/ko/). 0.x 동안은 minor 가 새 기능, patch 가 고침.
 
+## [0.30.2] — 2026-10-18
+
+### 고침
+- 업데이트 뒤 새 서버를 60초(웹, 터미널은 90초)만 기다리고 "docent start 로 켜세요"라고 하던 문제. launchd가 다시 켜는 서버는 Time Machine 백업처럼 디스크가 바쁠 때 몇 분 걸릴 수 있어 5분까지 기다리고, 서비스가 켜는 중이면 그렇게 알림 (ADR 0072).
+
 ## [0.30.1] — 2026-10-18
 
 ### 추가

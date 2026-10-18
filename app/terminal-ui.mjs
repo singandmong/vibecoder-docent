@@ -1632,11 +1632,11 @@ export async function runTerminal({ baseUrl, stdin = process.stdin, stdout = pro
 		try { result = await api.updateApply(); } catch (error) { failNotice(`업데이트하지 못했어요: ${reason(error)}`); return; }
 		if (!result.updated) { succeed(`최신 버전이에요 (v${result.current}).`); return; }
 		inform(`v${result.to}를 설치했어요. 서버가 다시 켜지기를 기다리는 중이에요.`);
-		for (let i = 0; i < 90 && state.running; i++) {
+		for (let i = 0; i < 300 && state.running; i++) {
 			await new Promise((done) => setTimeout(done, 1000));
 			try { if ((await api.health()).version === result.to) { requestRestart(); return; } } catch { /* 다시 켜지는 중 */ }
 		}
-		if (state.running) failNotice("설치는 끝났지만 서버가 90초 안에 다시 켜지지 않았어요. docent start 로 켠 뒤 /재시작 하세요.");
+		if (state.running) failNotice(result.restart === "supervisor" ? "설치는 끝났고 서비스가 새 서버를 켜는 중이에요. 켜지면 /재시작 하세요." : "설치는 끝났지만 서버가 5분 안에 다시 켜지지 않았어요. docent start 로 켠 뒤 /재시작 하세요.");
 	}
 
 	function scroll(delta, followBottom = false) {

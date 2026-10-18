@@ -102,7 +102,8 @@ if (args[0] === "update") {
 			const result = await response.json().catch(() => ({}));
 			if (!response.ok) throw new Error(result.error || `서버가 업데이트하지 못했어요 (HTTP ${response.status}).`);
 			process.stdout.write("docent: 설치했어요. 서버가 다시 켜지기를 기다려요");
-			const deadline = Date.now() + 60_000;
+			// 서비스 관리자(launchd)가 다시 켜는 서버는 Time Machine 백업 같은 디스크 부하 중에 몇 분 걸릴 수 있다.
+			const deadline = Date.now() + 300_000;
 			let now = null;
 			while (Date.now() < deadline) {
 				await new Promise((done) => setTimeout(done, 1000));
@@ -111,7 +112,9 @@ if (args[0] === "update") {
 				if (now?.version === result.to) break;
 			}
 			console.log("");
-			if (now?.version !== result.to) throw new Error("설치는 끝났지만 새 서버가 60초 안에 켜지지 않았어요. docent start 로 켜세요.");
+			if (now?.version !== result.to) throw new Error(result.restart === "supervisor"
+				? "설치는 끝났고 서비스가 새 서버를 켜는 중이에요. 5분 넘게 걸리고 있어요. 잠시 뒤 docent doctor 로 확인하세요."
+				: "설치는 끝났지만 새 서버가 5분 안에 켜지지 않았어요. docent start 로 켜세요.");
 			console.log(`docent: v${result.to} 서버가 켜졌어요. 열려 있는 터미널은 /재시작, 웹은 새로고침하세요.`);
 		} else {
 			const prefix = await installPrefix();
