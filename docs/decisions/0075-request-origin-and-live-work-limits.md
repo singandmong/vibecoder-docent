@@ -23,7 +23,7 @@ Status: Accepted
 ## 결과
 
 - 개발계(임시 HOME, 가짜 omp)에서 확인한 것:
-  - Host: `evil.example`, `attacker.test`, `example.com` 403. `127.0.0.1`, `localhost`, `100.112.68.113`, `192.168.0.9`, `barq-macmini.tail79fba7.ts.net` 200.
+  - Host: `evil.example`, `attacker.test`, `example.com` 403. `127.0.0.1`, `localhost`, 이 컴퓨터의 테일스케일 주소(`100.x.x.x`), 사설망 주소(`192.168.x.x`), 테일스케일 이름(`<기기>.ts.net`) 200.
   - 같은 세션의 17번째 실시간 구독 503, 여러 세션 합계 129번째 503, 서버는 계속 살아 있음.
   - 동시 설명 12개 모두 200, 동시에 도는 생성은 4개(살아 있는 대화 상한 `MAX_LIVE`)까지.
   - 웹 화면(세션 10개 표시, 콘솔 오류 없음)과 터미널 질문·답이 그대로 동작.
