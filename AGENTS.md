@@ -66,3 +66,4 @@
 - [0036 프로젝트 이름](docs/decisions/0036-rename-vibecoder.md)
 - [0037 모바일, 터미널, macOS](docs/decisions/0037-mobile-terminal-and-macos.md)
 - [0072 화면에서 새 버전 받기](docs/decisions/0072-update-from-release.md)
+- [0073 릴리스에 macOS 앱 포함](docs/decisions/0073-macos-app-in-release.md)

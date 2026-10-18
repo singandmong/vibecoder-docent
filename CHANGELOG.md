@@ -2,6 +2,14 @@
 
 형식: [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/). 버전은 [SemVer](https://semver.org/lang/ko/). 0.x 동안은 minor 가 새 기능, patch 가 고침.
 
+## [0.30.1] — 2026-10-18
+
+### 추가
+- 릴리스마다 macOS 앱이 함께 올라감: `Vibecoder-Docent-<버전>-macos-arm64.zip`(Apple Silicon), `…-macos-x64.zip`(Intel). 임시(ad-hoc) 서명이고 공증은 없어 처음 한 번 Gatekeeper 확인이 필요함 (ADR 0073).
+
+### 변경
+- `npm run build:macos` 가 묶은 앱을 임시 서명하고 서명을 검사함.
+
 ## [0.30.0] — 2026-10-18
 
 ### 추가

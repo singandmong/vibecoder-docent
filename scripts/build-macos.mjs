@@ -19,7 +19,7 @@ const APP_FILES = [
 function usage() {
   console.log([
     "Usage: node scripts/build-macos.mjs [--output <path.app>]",
-    "Builds an unsigned macOS app bundle for the current Mac architecture.",
+    "Builds an ad-hoc signed (not notarized) macOS app bundle for the current Mac architecture.",
     "Requires the Electron, @electron/packager, and project build dependencies.",
   ].join("\n"));
 }
@@ -181,12 +181,16 @@ async function main() {
     const currentOutput = await lstat(output).catch(() => null);
     if (currentOutput) await rm(output, { recursive: true });
     await rename(appBundle, output);
+    // 묶은 뒤 바뀐 파일 때문에 Electron 의 원래 서명이 깨지면 Apple Silicon 이 "손상된 앱"으로 거부한다. 임시(ad-hoc) 서명으로 다시 맞춘다.
+    // Developer ID 서명과 공증이 아니므로 내려받은 앱은 처음 한 번 Gatekeeper 확인이 필요하다 (ADR 0073).
+    execFileSync("codesign", ["--force", "--deep", "--sign", "-", output], { stdio: "inherit" });
+    execFileSync("codesign", ["--verify", "--deep", "--strict", output], { stdio: "inherit" });
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
 
-  console.log(`Created unsigned macOS app: ${output}`);
-  console.log("For public distribution, sign nested code with Developer ID and hardened runtime, then notarize and staple the app. Local unsigned builds may require a Gatekeeper override.");
+  console.log(`Created ad-hoc signed macOS app (${process.arch}): ${output}`);
+  console.log("Not notarized. A downloaded copy needs a one-time Gatekeeper approval (right-click > Open, or xattr -dr com.apple.quarantine).");
 }
 
 main().catch((error) => {

@@ -179,6 +179,18 @@ Herdr 창에서 실행하면 Herdr의 agents 창에 `docent`로 나타난다. �
 
 ## macOS 앱
 
+릴리스마다 GitHub Release에 앱이 함께 올라간다. Apple Silicon은 `Vibecoder-Docent-<버전>-macos-arm64.zip`, Intel Mac은 `…-macos-x64.zip`을 받아 풀고 `Vibecoder Docent.app`을 Applications 폴더로 옮긴다.
+
+앱은 임시(ad-hoc) 서명만 되어 있고 Apple 공증을 받지 않았다. 처음 한 번은 Finder에서 앱을 우클릭해 "열기"를 고르거나, 터미널에서 다음을 실행한다.
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Vibecoder Docent.app"
+```
+
+앱은 화면에서 업데이트하지 않는다. 새 버전은 릴리스의 zip을 다시 받아 바꾼다. 이 컴퓨터에 `docent` 서버가 이미 켜져 있으면 앱은 그 서버를 쓰므로, 서버를 `docent update`로 올리면 앱 화면도 새 버전이 된다 (ADR 0072, 0073).
+
+직접 만들 수도 있다.
+
 저장소에서 현재 Mac의 CPU 아키텍처에 맞는 앱을 만든다.
 
 ```sh
