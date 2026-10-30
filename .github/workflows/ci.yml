@@ -11,7 +11,7 @@ permissions:
 jobs:
   check:
     name: Node ${{ matrix.node }} / ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ github.repository == 'singandmong/vibecoder-docent' && github.ref == 'refs/heads/main' && contains(fromJSON('["push","workflow_dispatch","schedule"]'), github.event_name) && matrix.os == 'ubuntu-latest' && 'mac-mini-linux-arm64' || matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -36,7 +36,7 @@ jobs:
 
   bun:
     name: Bun / ubuntu-latest
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'singandmong/vibecoder-docent' && github.ref == 'refs/heads/main' && contains(fromJSON('["push","workflow_dispatch","schedule"]'), github.event_name) && 'mac-mini-linux-arm64' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
