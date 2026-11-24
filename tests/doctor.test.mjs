@@ -58,7 +58,7 @@ test("doctor shows the telegram bot state without affecting ok", async (t) => {
 	assert.match((await doctor(["--port", off], env)).stdout, /\[--\] 텔레그램 봇 꺼짐 \(선택 사항\)/);
 	const old = await botServer(t, null);
 	const oldReport = JSON.parse((await doctor(["--json", "--port", old], env)).stdout);
-	assert.deepEqual(oldReport.telegram, { enabled: false, paired: false, username: null });
+	assert.deepEqual(oldReport.telegram, { enabled: false, paired: false, username: null, lastError: null });
 	const unpaired = await botServer(t, { enabled: true, username: "docent_bot", paired: false, following: false, lastError: null });
 	const unpairedOut = await doctor(["--port", unpaired], env);
 	assert.match(unpairedOut.stdout, /\[!!\] 텔레그램 봇 켜짐, 아직 연결 안 됨: docent telegram pair/);
@@ -66,6 +66,16 @@ test("doctor shows the telegram bot state without affecting ok", async (t) => {
 	const paired = await botServer(t, { enabled: true, username: "docent_bot", paired: true, following: true, lastError: null });
 	assert.match((await doctor(["--port", paired], env)).stdout, /\[ok\] 텔레그램 봇 @docent_bot 연결됨/);
 	const pairedReport = JSON.parse((await doctor(["--json", "--port", paired], env)).stdout);
-	assert.deepEqual(pairedReport.telegram, { enabled: true, paired: true, username: "docent_bot" });
+	assert.deepEqual(pairedReport.telegram, { enabled: true, paired: true, username: "docent_bot", lastError: null });
 	assert.equal(pairedReport.ok, oldReport.ok, "telegram state never changes ok");
+	for (const isPaired of [false, true]) {
+		const broken = await botServer(t, { enabled: true, username: null, paired: isPaired, following: false, lastError: "토큰이 올바르지 않아요" });
+		const out = (await doctor(["--port", broken], env)).stdout;
+		assert.match(out, /\[!!\] 텔레그램 봇 켜짐, 문제가 있어요: 토큰이 올바르지 않아요/);
+		assert.match(out, /DOCENT_TELEGRAM_TOKEN 이 맞는지/);
+		assert.equal(out.includes("@null"), false);
+		assert.equal(out.includes("연결됨"), false);
+		const report = JSON.parse((await doctor(["--json", "--port", broken], env)).stdout);
+		assert.equal(report.telegram.lastError, "토큰이 올바르지 않아요");
+	}
 });

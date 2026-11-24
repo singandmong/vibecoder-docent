@@ -298,6 +298,36 @@ test("다시 짝짓기: 새 주인의 글만 처리되고 이전 주인의 글�
 	assert.equal(h.ports.opens[0].question, "새 주인의 질문");
 });
 
+test("다른 계정으로 다시 짝짓기하면 진행 중인 설명을 멈추고 그 출력이 새 계정에 가지 않는다", async (t) => {
+	const h = await setup(t);
+	await h.startBot();
+	await h.send(h.msg("42번의 비밀 질문"));
+	await until(() => h.ports.opens.length === 1, "open");
+	const job = h.ports.jobs[0];
+	const requestId = h.ports.opens[0].requestId;
+	job.emit({ type: "delta", text: "42번 전용 초안" });
+	await until(() => h.api.of("sendMessageDraft").length >= 1, "초안");
+	await h.send(h.msg("대기 질문", {}, OWNER));
+	await writeFile(h.pairPath, JSON.stringify({ code: CODE, expiresAt: T0 + 600_000 }));
+	const before = h.api.calls.length;
+	await h.send(h.msg(`/start ${CODE}`, {}, 99));
+	assert.deepEqual(h.ports.saved, [99]);
+	assert.deepEqual(h.ports.cancels, [{ profileId: "default", requestId }]);
+	job.emit({ type: "delta", text: "계속 오는 글" });
+	job.emit({ type: "answer", answer: answerOf({ raw: "✅ 42번 전용 답이에요\n\n비밀 설명" }) });
+	await sleep(80);
+	const after = h.api.calls.slice(before).filter((c) => ["sendMessage", "sendMessageDraft"].includes(c.method));
+	assert.ok(after.every((c) => !JSON.stringify(c.params).includes("42번 전용") && !JSON.stringify(c.params).includes("멈췄어요")));
+	assert.ok(after.some((c) => c.params.text.includes("연결했어요")));
+	assert.equal(h.ports.opens.length, 1);
+	await h.send(h.msg("99번의 질문", {}, 99));
+	await until(() => h.ports.opens.length === 2, "99 질문");
+	assert.equal(h.ports.opens[1].question, "99번의 질문");
+	h.ports.jobs[1].emit({ type: "answer", answer: answerOf() });
+	const final = await until(() => h.api.of("sendMessage").find((c) => c.params.parse_mode === "HTML" && c.params.chat_id === 99), "99 답");
+	assert.ok(final.params.text.includes("결론이에요"));
+});
+
 test("자동 따라가기: 시작하면 첫 세션을 구독하고 첫 항목이 바뀌면 옮기며 안내한다", async (t) => {
 	const h = await setup(t);
 	await h.startBot();

@@ -41,7 +41,7 @@ async function server(port) {
 // 0.17 이전처럼 /api/bot 이 없는 서버는 봇이 꺼진 것으로 본다.
 async function telegram(port) {
 	const bot = await fetch(`http://127.0.0.1:${port}/api/bot`, { signal: AbortSignal.timeout(3000) }).then((response) => (response.ok ? response.json() : null)).catch(() => null);
-	return bot?.enabled ? { enabled: true, paired: Boolean(bot.paired), username: bot.username ?? null } : { enabled: false, paired: false, username: null };
+	return bot?.enabled ? { enabled: true, paired: Boolean(bot.paired), username: bot.username ?? null, lastError: bot.lastError ?? null } : { enabled: false, paired: false, username: null, lastError: null };
 }
 
 /** 모델 한 번 호출로 omp 로그인과 기본 모델 연결을 확인한다. 도슨트와 같은 격리 실행 정책을 쓴다. */
@@ -93,7 +93,9 @@ export async function diagnose({ port, probe: wantProbe = false, env = process.e
 		if (report.server.version !== report.docent.version) next.push(`켜져 있는 서버가 설치한 도슨트와 다른 버전(${report.server.version ?? "0.17 이전"})이에요. 켜 둔 docent를 끄고 docent --no-open 으로 다시 켜세요.`);
 		if (!Object.keys(report.server.sessions).length) next.push("읽을 수 있는 세션이 아직 없어요. omp, Claude Code, Codex, Gemini CLI, pi 중 하나로 작업을 한 번 시작하세요.");
 	}
-	if (report.telegram?.enabled && !report.telegram.paired) next.push("텔레그램 봇이 켜져 있지만 아직 연결 안 됐어요. docent telegram pair 로 연결 링크를 만드세요.");
+	const botBroken = Boolean(report.telegram?.enabled && (report.telegram.lastError || !report.telegram.username));
+	if (botBroken) next.push("텔레그램 봇에 문제가 있어요. DOCENT_TELEGRAM_TOKEN 이 맞는지 확인하고 서버를 다시 켜세요.");
+	else if (report.telegram?.enabled && !report.telegram.paired) next.push("텔레그램 봇이 켜져 있지만 아직 연결 안 됐어요. docent telegram pair 로 연결 링크를 만드세요.");
 	report.ok = report.node.ok && report.omp.found && Boolean(report.omp.chatModels) && (report.probe ? report.probe.ok : true);
 	report.next = next;
 	return report;
@@ -116,6 +118,7 @@ export function formatReport(report) {
 	if (report.telegram) {
 		const bot = report.telegram;
 		lines.push(!bot.enabled ? "[--] 텔레그램 봇 꺼짐 (선택 사항)"
+			: (bot.lastError || !bot.username) ? `[!!] 텔레그램 봇 켜짐, 문제가 있어요: ${bot.lastError || "아직 시작 중이에요"}`
 			: bot.paired ? `[ok] 텔레그램 봇 @${bot.username} 연결됨`
 			: "[!!] 텔레그램 봇 켜짐, 아직 연결 안 됨: docent telegram pair");
 	}

@@ -101,6 +101,7 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 	let active = null; // 진행 중인 사용자 질문
 	let queue = [];
 	let draftSeq = 0;
+	let epoch = 0; // 주인이 바뀔 때마다 올린다. 이전 주인의 작업 출력은 epoch 가 달라 버려진다.
 	let saving = Promise.resolve();
 	let followLock = Promise.resolve();
 	const seen = new Set(); // 이미 알린 thread
@@ -224,10 +225,10 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 	const sendText = (text, extra = {}, chatId = owner) => send("sendMessage", { chat_id: chatId, text, ...extra });
 	const keyboard = (rows) => ({ reply_markup: { inline_keyboard: rows } });
 
-	async function sendParts(parts, { replyTo, buttons, sessionId, thread }) {
+	async function sendParts(parts, { replyTo, buttons, sessionId, thread, epoch: bound }) {
 		for (let i = 0; i < parts.length; i++) {
 			if (i > 0) await sleep(T.chunkGapMs);
-			if (stopped) return;
+			if (stopped || (bound !== undefined && bound !== epoch)) return;
 			const params = { chat_id: owner, text: parts[i], parse_mode: "HTML", link_preview_options: { is_disabled: true } };
 			if (replyTo) params.reply_parameters = { message_id: replyTo, allow_sending_without_reply: true };
 			if (buttons && i === parts.length - 1) params.reply_markup = { inline_keyboard: buttons };
@@ -237,13 +238,14 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 	}
 
 	async function sendAnswer(answer, ctx) {
+		if (ctx.epoch !== epoch) return;
 		const thread = typeof answer.thread === "string" ? answer.thread : "";
 		if (thread && ctx.focus) setFocus(thread, ctx.focus);
 		const rows = [EXPLAIN_ACTIONS.map((action, index) => ({ text: action.name[0], callback_data: `a:${addButton({ kind: "a", sessionId: ctx.sessionId, thread, action: index })}` }))];
 		const ref = answer.citations?.find?.((citation) => typeof citation?.id === "string")?.id;
 		if (ref) rows[0].push({ text: "원문", callback_data: `r:${addButton({ kind: "r", sessionId: ctx.sessionId, thread, ref })}` });
 		const raw = typeof answer.raw === "string" ? answer.raw : [answer.headline, answer.explain].filter(Boolean).join("\n\n");
-		await sendParts(answerMessages(raw), { replyTo: ctx.replyTo, buttons: rows, sessionId: ctx.sessionId, thread });
+		await sendParts(answerMessages(raw), { replyTo: ctx.replyTo, buttons: rows, sessionId: ctx.sessionId, thread, epoch: ctx.epoch });
 		await save();
 	}
 
@@ -267,6 +269,7 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 			};
 			const sendDraft = async () => {
 				timer = null;
+				if (ctx.epoch !== epoch) return;
 				lastDraft = Date.now();
 				const ok = await send("sendMessageDraft", { chat_id: owner, draft_id: ctx.draftId, text: text.slice(0, 4000), can_stop: true });
 				if (ok === null) ctx.draft = false;
@@ -277,6 +280,7 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 				timer = setTimeout(() => detach(sendDraft(), "초안"), wait);
 			};
 			const handle = async (line) => {
+				if (ctx.epoch !== epoch) return;
 				if (line.type === "answer") await sendAnswer(line.answer, ctx);
 				else if (line.type === "error") await sendText(`설명하지 못했어요: ${line.error}`);
 				else if (line.type === "cancelled") await sendText("멈췄어요.");
@@ -319,9 +323,9 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 
 	// 질문 ------------------------------------------------------------------
 	async function runItem(item) {
-		const run = { requestId: randomUUID(), draftId: ++draftSeq, cancelRequested: false, opened: false };
+		const run = { requestId: randomUUID(), draftId: ++draftSeq, cancelRequested: false, opened: false, epoch };
 		active = run;
-		const ctx = { sessionId: item.sessionId, focus: item.focus ?? null, replyTo: item.replyTo, draft: true, draftId: run.draftId, auto: false };
+		const ctx = { sessionId: item.sessionId, focus: item.focus ?? null, replyTo: item.replyTo, draft: true, draftId: run.draftId, auto: false, epoch: run.epoch };
 		try {
 			let res;
 			try {
@@ -334,14 +338,14 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 					...(item.difficulty ? { difficulty: item.difficulty } : {}),
 				});
 			} catch (error) {
-				await sendText(`설명하지 못했어요: ${error?.message ?? error}`);
+				if (run.epoch === epoch) await sendText(`설명하지 못했어요: ${error?.message ?? error}`);
 				return;
 			}
 			run.opened = true;
 			if (run.cancelRequested) await cancelJob(run.requestId);
 			await runResult(res, ctx);
 		} finally {
-			active = null;
+			if (active === run) active = null;
 		}
 	}
 
@@ -410,6 +414,7 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 	}
 
 	async function runAuto(s, card, ask, replyTo) {
+		const bound = epoch;
 		let res;
 		try {
 			res = await ports.open({ id: s.sessionId, profileId, question: ask.question, focus: card.focus, auto: true, difficulty: ask.difficulty, requestId: ask.requestId });
@@ -417,7 +422,7 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 			logError("미리 설명에 붙지 못했어요", error);
 			return;
 		}
-		await runResult(res, { sessionId: s.sessionId, focus: card.focus, replyTo, draft: false, auto: true });
+		await runResult(res, { sessionId: s.sessionId, focus: card.focus, replyTo, draft: false, auto: true, epoch: bound });
 	}
 
 	const enqueue = (s, fn, what) => {
@@ -610,10 +615,20 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 		await ports.saveOwner(id);
 		await rm(pairPath, { force: true }).catch((error) => logError("짝짓기 파일을 지우지 못했어요", error));
 		if (owner !== id) {
+			// 이전 주인의 작업은 멈추고, 그 출력은 epoch 가 달라 새 주인에게 가지 않는다.
+			const old = active;
+			epoch++;
+			active = null;
+			queue = [];
+			received.length = 0;
 			state.messages = [];
 			state.buttons = {};
 			state.focuses = {};
-			queue = [];
+			state.lastCardAt = state.lastCardAt ?? {};
+			if (old) {
+				old.cancelRequested = true;
+				if (old.opened) await cancelJob(old.requestId);
+			}
 		}
 		owner = id;
 		state.following = null;

@@ -160,7 +160,11 @@ if (args[0] === "telegram") {
 		process.exit(1);
 	}
 	const bot = await fetch(`http://127.0.0.1:${port}/api/bot`, { signal: AbortSignal.timeout(5000) }).then((response) => (response.ok ? response.json() : null)).catch(() => null);
-	if (!bot?.enabled || !bot.username) {
+	if (bot?.enabled && !bot.username) {
+		console.error(`docent telegram pair: 봇이 아직 준비되지 않았어요: ${bot.lastError || "잠시 뒤 다시 실행해 주세요"}\n코드: ${code}`);
+		process.exit(1);
+	}
+	if (!bot?.enabled) {
 		console.error(`docent telegram pair: 서버에 DOCENT_TELEGRAM_TOKEN 이 없어 봇이 꺼져 있어요.\n코드: ${code}`);
 		process.exit(1);
 	}
