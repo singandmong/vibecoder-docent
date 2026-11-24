@@ -312,6 +312,7 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 	}
 
 	async function runResult(res, ctx) {
+		if (ctx.epoch !== epoch) return; // 주인이 바뀐 뒤 늦게 온 결과는 보내지 않는다
 		if (res?.subscribe) await followJob(res, ctx);
 		else if (res?.answer) await sendAnswer(res.answer, ctx);
 		else if (res?.error) {

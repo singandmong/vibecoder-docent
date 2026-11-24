@@ -78,4 +78,14 @@ test("doctor shows the telegram bot state without affecting ok", async (t) => {
 		const report = JSON.parse((await doctor(["--json", "--port", broken], env)).stdout);
 		assert.equal(report.telegram.lastError, "토큰이 올바르지 않아요");
 	}
+	const transient = await botServer(t, { enabled: true, username: "docent_bot", paired: true, following: false, lastError: "텔레그램 getUpdates 요청 실패 (409)" });
+	const transientOut = (await doctor(["--port", transient], env)).stdout;
+	assert.match(transientOut, /\[!!\] 텔레그램 봇 켜짐, 문제가 있어요: 텔레그램 getUpdates 요청 실패 \(409\)/);
+	assert.match(transientOut, /연결이 잠시 끊겼을 수 있어요/);
+	assert.equal(transientOut.includes("DOCENT_TELEGRAM_TOKEN"), false);
+	const starting = await botServer(t, { enabled: true, username: null, paired: false, following: false, lastError: null });
+	const startingOut = (await doctor(["--port", starting], env)).stdout;
+	assert.match(startingOut, /문제가 있어요: 아직 시작 중이에요/);
+	assert.match(startingOut, /봇이 아직 시작 중이에요\. 잠시 뒤 다시 확인하세요\./);
+	assert.equal(startingOut.includes("DOCENT_TELEGRAM_TOKEN"), false);
 });

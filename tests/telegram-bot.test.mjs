@@ -328,6 +328,31 @@ test("다른 계정으로 다시 짝짓기하면 진행 중인 설명을 멈추�
 	assert.ok(final.params.text.includes("결론이에요"));
 });
 
+test("다른 계정으로 다시 짝짓기한 뒤 늦게 끝난 open 의 오류와 던진 오류는 아무도 받지 못한다", async (t) => {
+	const h = await setup(t);
+	await h.startBot();
+	const gates = [];
+	h.ports.openImpl = () => new Promise((resolve, reject) => gates.push({ resolve, reject }));
+	await h.send(h.msg("42번의 늦는 질문"));
+	await until(() => gates.length === 1, "첫 open 대기");
+	await writeFile(h.pairPath, JSON.stringify({ code: CODE, expiresAt: T0 + 600_000 }));
+	await h.send(h.msg(`/start ${CODE}`, {}, 99));
+	const before = h.api.calls.length;
+	gates[0].resolve({ error: new Error("42번 전용 오류") });
+	await sleep(60);
+	h.ports.openImpl = () => new Promise((resolve, reject) => gates.push({ resolve, reject }));
+	await h.send(h.msg("99번의 질문", {}, 99));
+	await until(() => gates.length === 2, "둘째 open 대기");
+	await writeFile(h.pairPath, JSON.stringify({ code: CODE, expiresAt: T0 + 600_000 }));
+	await h.send(h.msg(`/start ${CODE}`, {}, 42));
+	const mid = h.api.calls.length;
+	gates[1].reject(httpError(400, "99번 전용 던진 오류"));
+	await sleep(60);
+	const leaked = h.api.calls.slice(before).filter((c) => c.method === "sendMessage" && /전용/.test(JSON.stringify(c.params)));
+	assert.deepEqual(leaked, []);
+	assert.deepEqual(h.api.calls.slice(mid).filter((c) => c.method === "sendMessage" && /전용/.test(JSON.stringify(c.params))), []);
+});
+
 test("자동 따라가기: 시작하면 첫 세션을 구독하고 첫 항목이 바뀌면 옮기며 안내한다", async (t) => {
 	const h = await setup(t);
 	await h.startBot();

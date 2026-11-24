@@ -94,7 +94,12 @@ export async function diagnose({ port, probe: wantProbe = false, env = process.e
 		if (!Object.keys(report.server.sessions).length) next.push("읽을 수 있는 세션이 아직 없어요. omp, Claude Code, Codex, Gemini CLI, pi 중 하나로 작업을 한 번 시작하세요.");
 	}
 	const botBroken = Boolean(report.telegram?.enabled && (report.telegram.lastError || !report.telegram.username));
-	if (botBroken) next.push("텔레그램 봇에 문제가 있어요. DOCENT_TELEGRAM_TOKEN 이 맞는지 확인하고 서버를 다시 켜세요.");
+	if (botBroken) {
+		const cause = report.telegram.lastError;
+		next.push(cause === "토큰이 올바르지 않아요" ? "텔레그램 봇에 문제가 있어요. DOCENT_TELEGRAM_TOKEN 이 맞는지 확인하고 서버를 다시 켜세요."
+			: !cause ? "봇이 아직 시작 중이에요. 잠시 뒤 다시 확인하세요."
+			: "텔레그램 연결이 잠시 끊겼을 수 있어요. 계속되면 서버 로그(docent.log)를 보세요.");
+	}
 	else if (report.telegram?.enabled && !report.telegram.paired) next.push("텔레그램 봇이 켜져 있지만 아직 연결 안 됐어요. docent telegram pair 로 연결 링크를 만드세요.");
 	report.ok = report.node.ok && report.omp.found && Boolean(report.omp.chatModels) && (report.probe ? report.probe.ok : true);
 	report.next = next;
