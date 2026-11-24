@@ -3,7 +3,7 @@
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { httpError } from "./errors.mjs";
 import { threadKey, threadText, withThreads } from "./thread.mjs";
@@ -271,14 +271,19 @@ export async function config() {
 
 /** config.json 의 일부 항목만 고친다. 나머지 항목과 옛 모양은 그대로 둔다. */
 export async function saveConfig(patch) {
-	const path = join(DOCENT_HOME, "config.json");
 	const next = { ...(await config()), ...patch };
-	await mkdir(DOCENT_HOME, { recursive: true });
+	await writeJsonAtomic(join(DOCENT_HOME, "config.json"), next);
+	return next;
+}
+
+/** JSON 을 임시 파일(0600)에 쓰고 fsync 한 뒤 바꿔 끼운다. 읽는 쪽은 반쯤 쓴 파일을 보지 않는다. */
+export async function writeJsonAtomic(path, value) {
+	await mkdir(dirname(path), { recursive: true });
 	const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
 	try {
 		const file = await open(temp, "wx", 0o600);
 		try {
-			await file.writeFile(`${JSON.stringify(next, null, 2)}\n`);
+			await file.writeFile(`${JSON.stringify(value, null, 2)}\n`);
 			await file.sync();
 		} finally {
 			await file.close();
@@ -287,5 +292,4 @@ export async function saveConfig(patch) {
 	} finally {
 		await rm(temp, { force: true });
 	}
-	return next;
 }
