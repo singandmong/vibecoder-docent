@@ -50,6 +50,9 @@ app/update.mjs            새 버전 확인(GitHub 최신 정식 릴리스, 숫�
 app/install-omp.mjs       `docent install-omp`: 프론트매터 + 코어를 결합해 omp 서브에이전트 정의로, `/docent` 확장 복사. 셸 없이 모든 OS 에서 같은 명령 (ADR 0057)
 adapters/omp/docent-command.ts  OMP `/docent` 슬래시 명령. `docent herdr`를 부르는 얇은 확장 (ADR 0044)
 app/doctor.mjs            `docent doctor`: Node, omp와 모델, 서버와 세션 수, 선택적 모델 호출 점검 (ADR 0041)
+app/telegram-api.mjs      텔레그램 Bot API 호출 한 곳: Node 내장 `fetch`, 기본 주소 `https://api.telegram.org`(시험용 `DOCENT_TELEGRAM_API`), 토큰이 든 주소와 토큰을 오류·로그에 넣지 않음(`redactToken`), 429 의 retryAfter (ADR 0076)
+app/telegram-format.mjs   답과 카드를 텔레그램 글로: HTML 모드 이스케이프, 굵게·코드·인용만 바꾸고 나머지는 평문, "더 자세히"는 접는 인용, 3800자 안 조각 나누기, 카드 알림 글, 원문 보기 글 (ADR 0076)
+app/telegram-bot.mjs      도슨트 봇 본체: 롱 폴링 수신 루프, 주인 확인과 짝짓기, 따라가는 세션, 카드 알림, 질문과 스트림, 중단·바로잡기·대기열, 상태 파일. 서버 기능은 ports 로 받음 (ADR 0076)
 INSTALL-AGENT.md          링크 하나로 에이전트가 따라 하는 설치 안내 (ADR 0041)
 bin/docent-mobile.mjs    Tailscale Serve 상태 확인과 명시적 사설 HTTPS 설정
 scripts/transcript-omp.mjs    omp 세션 adapter: 목록 메타 / 전사 / 사건 카드 후보. pi 도 쓰는 omp 모양 adapter (모듈 + CLI, ADR 0054)
@@ -142,6 +145,18 @@ docs/                     개념·범위·결정
 Streamdown·React는 Markdown 표시를 담당하며 나머지 페이지 상태는 기존 흐름을 유지한다. 설명·복습·PiP에 같은 렌더링 원칙을 적용한다. 표·목록·코드 블록은 슬롯 내부에서 구조를 보존한다. 긴 설명은 접거나 크게 열고, 근거 원문은 설명과 구별한다. 임의 HTML·실행 링크·추적 이미지를 차단한다.
 
 `npm run build`로 로컬 자산을 만들고 `npm pack`의 prepack에서도 빌드한다. 서버는 정해진 자산 경로만 제공한다. 릴리스 패키지에 자산을 넣으므로 사용자 실행 시 빌드 도구나 CDN 접속이 필요하지 않다.
+
+## 도슨트 봇 (ADR 0076)
+
+텔레그램 개인 채팅에서 같은 서버의 설명을 주고받는 서버 안 module 이다. 새 프로세스도 의존성도 없고, 토큰(`DOCENT_TELEGRAM_TOKEN`)이 있을 때만 시작한다. 봇은 설명 모델을 직접 부르지 않고 설명은 `asks.open` 으로만 만든다.
+
+- **조립**: `server.mjs` 가 `createTelegramBot({api, config, statePath, pairPath, ports})` 에 서버 기능을 ports 로 채운다(`catalog.list`, 미리 설명 hub 의 `subscribe`, `asks.open/cancel/steer`, `store.history`, 근거 해석, `learning.profile`, config 저장). 시작 오류(토큰 거절 등)는 봇만 멈추고 서버는 계속 돈다. `GET /api/bot` 이 `{enabled, username, paired, following, lastError}` 를 낸다(토큰 없음). 서버가 끝날 때 봇도 정리한다.
+- **따라가는 세션**: 상태 파일의 `following` 이 없거나 `explicit` 이 거짓이면 자동 모드로, 시작 때와 짝지은 직후 `listSessions()` 첫 항목을 따라가고 60초마다 첫 항목을 다시 봐서 바뀌면 옮겨 간다. `/session` 으로 직접 고르면 `explicit` 으로 고정하고, "자동으로 따라가기" 로 되돌린다.
+- **카드 알림**: 따라가는 세션의 질문·작업 결과·계획 카드를 첫 줄(사건 종류 문구와 `focus.label`)만 보낸다. 전문은 '원문 보기' 버튼을 누를 때만 보낸다. 같은 스레드는 한 번만 알리고, 다시 보기(past) 카드는 기준 시각(`lastCardAt`, 없으면 따라가기 시작 이유에 따른 시각)보다 새로울 때만, 한 번에 3개까지 알린다.
+- **스트림**: 질문은 작업을 열고 스트림 처리를 따로 돌려 설명 중에도 중단 버튼과 `/stop` 이 바로 처리된다. 답을 만드는 동안 `sendMessageDraft` 로 초안을 보여 주고, 끝나면 `sendMessage` 로 3800자 이하 조각을 순서대로 보내 확정한다. 보낸 메시지 id 는 `{sessionId, thread}` 표에 넣어, 그 메시지에 답장하면 같은 스레드로 이어 묻는다. 스레드는 서버 값만 쓰고 봇이 계산하지 않는다.
+- **상태 파일**: `DOCENT_HOME/telegram.json`(`writeJsonAtomic`)에 getUpdates offset, 따라가는 세션, 카드 알림 시각, 메시지·스레드 표, 카드 focus, 버튼 표를 둔다. 망가졌으면 빈 상태로 시작한다.
+- **상한**: 대기 질문은 chat 마다 5개, 메시지 표와 버튼 표는 각 300개, focus 는 50개 스레드까지 기억한다.
+- **주인 확인**: config.json `telegram.owner` 와 `from.id` 가 같고 개인 채팅일 때만 처리한다. 짝짓기 코드는 `docent telegram pair` 가 `DOCENT_HOME/telegram-pair.json` 으로 만들고, HTTP 로는 발급하지 않는다.
 
 ## 코어를 고칠 때
 

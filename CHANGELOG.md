@@ -2,6 +2,14 @@
 
 형식: [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/). 버전은 [SemVer](https://semver.org/lang/ko/). 0.x 동안은 minor 가 새 기능, patch 가 고침.
 
+## [0.32.0] — 2026-11-24
+
+### 추가
+- 텔레그램 도슨트 봇: 토큰(`DOCENT_TELEGRAM_TOKEN`)을 서버에 넣으면 주인 한 명의 개인 채팅에서 질문하고 답을 스트림으로 받고, 따라가는 세션의 새 카드를 첫 줄 알림으로 받음. 새 프로세스와 의존성 없이 서버 안에서 돎. 토큰이 없으면 기존 동작 그대로 (ADR 0076).
+- `docent telegram pair`: 10분짜리 짝짓기 코드를 만들고 휴대폰에서 열 `t.me` 링크를 출력함. 코드는 이 컴퓨터의 파일로만 발급하고 HTTP 경로는 없음.
+- `docent doctor` 에 봇 상태(꺼짐, 짝짓기 전, 켜짐) 항목과 `--json` 의 `telegram` 키.
+- `GET /api/bot`: 봇 상태(`enabled`, `username`, `paired`, `following`, `lastError`). 토큰은 싣지 않음.
+
 ## [0.31.0] — 2026-10-18
 
 ### 보안
