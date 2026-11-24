@@ -27,7 +27,8 @@ export async function until(check, ms = 5000) {
 
 const line = (value) => JSON.stringify(value) + "\n";
 
-export async function fixture(t) {
+/** options.env 는 서버 환경에 덧쓰고, options.config 는 서버가 뜨기 전에 config.json 으로 쓴다. */
+export async function fixture(t, options = {}) {
 	const home = await mkdtemp(join(tmpdir(), "docent-model-test-"));
 	const stateHome = join(home, "state");
 	const executable = join(home, "omp.mjs");
@@ -41,6 +42,7 @@ export async function fixture(t) {
 	await mkdir(stateHome);
 	// Pre-model preferences must normalize without migrating or discarding old records.
 	await writeFile(join(stateHome, "learning.json"), JSON.stringify({ version: 1, profiles: [{ id: "default", name: "기본", defaultDifficulty: "NORMAL", domainDifficulties: {} }], items: [], records: [], requests: {} }));
+	if (options.config) await writeFile(join(stateHome, "config.json"), JSON.stringify(options.config));
 	await writeFile(sessionFile, line({ type: "user", uuid: "u1", cwd: "/project", timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "검색 상태를 설명해줘" } }));
 	await writeFile(catalogFile, JSON.stringify(catalog));
 	await writeFile(controlFile, "{}");
@@ -53,7 +55,7 @@ import { createInterface } from 'node:readline';
 const args = process.argv.slice(2);
 const flag = name => args.includes(name) ? args[args.indexOf(name) + 1] : null;
 const control = async () => JSON.parse(await readFile(${JSON.stringify(controlFile)}, 'utf8'));
-const log = value => appendFile(${JSON.stringify(logFile)}, JSON.stringify(value) + '\\n');
+const log = value => appendFile(${JSON.stringify(logFile)}, JSON.stringify({ ...value, ...(process.env.DOCENT_TELEGRAM_TOKEN ? { telegramToken: true } : {}) }) + '\\n');
 const model = flag('--model');
 const provider = flag('--provider');
 if (args[0] === '--version') {
@@ -116,6 +118,7 @@ if (args[0] === '--version') {
 `);
 	let server;
 	let address;
+	let output = "";
 	async function stop() {
 		if (!server || server.exitCode !== null || server.signalCode !== null) return;
 		const exit = once(server, "exit");
@@ -129,12 +132,12 @@ if (args[0] === '--version') {
 		const port = reservation.address().port;
 		await new Promise((resolve) => reservation.close(resolve));
 		address = `http://127.0.0.1:${port}`;
-		server = spawn(process.execPath, [join(root, "app/server.mjs")], { cwd: root, env: { ...process.env, HOME: home, DOCENT_HOME: stateHome, DOCENT_HOST: "127.0.0.1", DOCENT_PORT: String(port), DOCENT_PEERS: "", DOCENT_ON_LISTEN: "", TYPESAFE_API_KEY: "", OMP_BIN: executable }, stdio: ["ignore", "pipe", "pipe"] });
-		let output = "";
+		server = spawn(process.execPath, [join(root, "app/server.mjs")], { cwd: root, env: { ...process.env, HOME: home, DOCENT_HOME: stateHome, DOCENT_HOST: "127.0.0.1", DOCENT_PORT: String(port), DOCENT_PEERS: "", DOCENT_ON_LISTEN: "", TYPESAFE_API_KEY: "", DOCENT_TELEGRAM_TOKEN: "", DOCENT_TELEGRAM_API: "", OMP_BIN: executable, ...options.env }, stdio: ["ignore", "pipe", "pipe"] });
+		output = "";
 		let startupError;
 		server.on("error", (error) => { startupError = error; });
 		server.stdout.on("data", (chunk) => { output += chunk; });
-		server.stderr.resume();
+		server.stderr.on("data", (chunk) => { output += chunk; });
 		await until(() => {
 			if (startupError) throw startupError;
 			if (server.exitCode !== null) throw new Error("Fixture server exited before listening");
@@ -145,6 +148,8 @@ if (args[0] === '--version') {
 	await start();
 	return {
 		sessionId,
+		home,
+		stateHome,
 		ompBin: executable,
 		sessionFile,
 		get address() { return address; },
@@ -181,6 +186,14 @@ if (args[0] === '--version') {
 			return appendFile(join(dir, `agent-${id}.jsonl`), line(entry));
 		},
 		stored() { return readFile(join(stateHome, "learning.json"), "utf8").then(JSON.parse); },
+		serverOutput() /* stdout 과 stderr 를 합친 전체 */ { return output; },
+		/** 서버에 SIGTERM 을 보내고 종료 코드를 돌려준다. */
+		async terminate() {
+			const exit = once(server, "exit");
+			server.kill("SIGTERM");
+			const [code, signal] = await exit;
+			return { code, signal };
+		},
 		async restart() { await stop(); await start(); },
 	};
 }

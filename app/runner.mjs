@@ -32,6 +32,8 @@ export async function createRunner({ bin, tmpRoot, timeoutMs }) {
 	await writeFile(isolation, ISOLATION);
 	const base = ["--config", isolation, ...ISOLATION_FLAGS];
 	const env = { ...process.env, TERM: "dumb" };
+	// 설명 대화에는 read 도구가 있다. 봇 토큰은 omp 자식에게 넘기지 않는다.
+	delete env.DOCENT_TELEGRAM_TOKEN;
 	const children = new Set();
 	let closed = false;
 	function launch(args) {

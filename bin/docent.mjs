@@ -128,6 +128,46 @@ if (args[0] === "update") {
 		process.exit(1);
 	}
 }
+if (args[0] === "telegram") {
+	const rest = args.slice(1);
+	const usage = "usage: docent telegram pair [--port N]";
+	if (rest[0] !== "pair") {
+		console.error(`docent telegram: ${rest[0] ? `알 수 없는 하위 명령이에요: ${rest[0]}` : "하위 명령이 필요해요."}\n${usage}`);
+		process.exit(2);
+	}
+	const options = rest.slice(1);
+	const unknown = options.find((arg, i) => arg !== "--port" && options[i - 1] !== "--port");
+	if (unknown || (options.includes("--port") && options[options.indexOf("--port") + 1] === undefined)) {
+		console.error(`docent telegram pair: ${unknown ? `알 수 없는 옵션이에요: ${unknown}` : "옵션 뒤에 값이 필요해요."}\n${usage}`);
+		process.exit(2);
+	}
+	const { config, writeJsonAtomic, DOCENT_HOME } = await import("../app/store.mjs");
+	const port = Number(options.includes("--port") ? options[options.indexOf("--port") + 1] : process.env.DOCENT_PORT ?? (await config()).port ?? 4747);
+	if (!Number.isInteger(port) || port < 1 || port > 65535) {
+		console.error("docent telegram pair: 포트는 1에서 65535 사이 정수여야 해요.");
+		process.exit(2);
+	}
+	const { randomBytes } = await import("node:crypto");
+	const { mkdir } = await import("node:fs/promises");
+	const { join } = await import("node:path");
+	// 코드는 10분 동안만 쓸 수 있다. expiresAt 은 epoch 밀리초 숫자다.
+	const code = randomBytes(12).toString("base64url");
+	try {
+		await mkdir(DOCENT_HOME, { recursive: true });
+		await writeJsonAtomic(join(DOCENT_HOME, "telegram-pair.json"), { code, expiresAt: Date.now() + 10 * 60_000 });
+	} catch (error) {
+		console.error(`docent telegram pair: 코드를 저장하지 못했어요: ${error.message}`);
+		process.exit(1);
+	}
+	const bot = await fetch(`http://127.0.0.1:${port}/api/bot`, { signal: AbortSignal.timeout(5000) }).then((response) => (response.ok ? response.json() : null)).catch(() => null);
+	if (!bot?.enabled || !bot.username) {
+		console.error(`docent telegram pair: 서버에 DOCENT_TELEGRAM_TOKEN 이 없어 봇이 꺼져 있어요.\n코드: ${code}`);
+		process.exit(1);
+	}
+	if (bot.paired) console.log("이미 연결돼 있어요. 다시 연결하면 새 계정으로 바뀌어요.");
+	console.log(`https://t.me/${bot.username}?start=${code}\n휴대폰 텔레그램에서 이 링크를 열고 시작을 누르세요. 10분 안에 쓰세요.`);
+	process.exit(0);
+}
 if (args[0] === "herdr") {
 	const rest = args.slice(1);
 	const value = (name) => (rest.includes(name) ? rest[rest.indexOf(name) + 1] : undefined);
@@ -178,6 +218,7 @@ if (args.includes("-h") || args.includes("--help")) {
 			"       docent stop [--port N]   백그라운드로 켠 서버를 끔",
 			"       docent update [--check] [--port N]   GitHub 릴리스의 새 버전을 확인하고 설치. 켜 둔 서버는 새 파일로 다시 켜짐",
 			"       docent doctor [--json] [--probe] [--port N]   설치 상태 점검. --probe 는 모델을 한 번 불러 로그인까지 확인",
+			"       docent telegram pair [--port N]   텔레그램 도슨트 봇을 내 계정에 연결하는 링크를 만듦. 서버에 DOCENT_TELEGRAM_TOKEN 필요",
 			"       docent herdr [--split] [--session <id> | --session-file <경로>]   이 터미널 창에서 바로 도슨트 TUI 를 엶. --split 이면 Herdr 창 오른쪽에 띄움",
 			"       docent install-omp [--project]   omp 서브에이전트 정의와 /docent 명령 설치. 코어나 확장을 고친 뒤에도 다시 실행",
 			"  --host tailscale     이 컴퓨터의 테일스케일 주소에도 열어 다른 컴퓨터의 docent 가 읽어 가게 한다",

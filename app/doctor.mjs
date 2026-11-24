@@ -38,6 +38,12 @@ async function server(port) {
 	return { running: true, url, version: health?.app === "vibecoder-docent" ? health.version : null, sessions };
 }
 
+// 0.17 이전처럼 /api/bot 이 없는 서버는 봇이 꺼진 것으로 본다.
+async function telegram(port) {
+	const bot = await fetch(`http://127.0.0.1:${port}/api/bot`, { signal: AbortSignal.timeout(3000) }).then((response) => (response.ok ? response.json() : null)).catch(() => null);
+	return bot?.enabled ? { enabled: true, paired: Boolean(bot.paired), username: bot.username ?? null } : { enabled: false, paired: false, username: null };
+}
+
 /** 모델 한 번 호출로 omp 로그인과 기본 모델 연결을 확인한다. 도슨트와 같은 격리 실행 정책을 쓴다. */
 async function probe(bin) {
 	const tmpRoot = await mkdtemp(join(tmpdir(), "docent-doctor-"));
@@ -72,9 +78,11 @@ export async function diagnose({ port, probe: wantProbe = false, env = process.e
 		node: { version: process.versions.node, required: MIN_NODE, ok: newer(process.versions.node, MIN_NODE) },
 		omp: { found: Boolean(ompVersion), version: ompVersion?.trim().split("\n")[0] ?? null, chatModels: models },
 		server: await server(port),
+		telegram: null,
 		probe: wantProbe && ompVersion ? await probe(bin) : null,
 		jev: { configured: Boolean(env.TYPESAFE_API_KEY) },
 	};
+	if (report.server.running) report.telegram = await telegram(port);
 	const next = [];
 	if (!report.node.ok) next.push(`Node.js ${MIN_NODE} 이상으로 올리세요. 지금은 ${report.node.version}이에요.`);
 	if (!report.omp.found) next.push("omp를 설치하세요 (https://omp.sh). 설치 뒤 omp를 한 번 실행해 로그인하세요.");
@@ -85,6 +93,7 @@ export async function diagnose({ port, probe: wantProbe = false, env = process.e
 		if (report.server.version !== report.docent.version) next.push(`켜져 있는 서버가 설치한 도슨트와 다른 버전(${report.server.version ?? "0.17 이전"})이에요. 켜 둔 docent를 끄고 docent --no-open 으로 다시 켜세요.`);
 		if (!Object.keys(report.server.sessions).length) next.push("읽을 수 있는 세션이 아직 없어요. omp, Claude Code, Codex, Gemini CLI, pi 중 하나로 작업을 한 번 시작하세요.");
 	}
+	if (report.telegram?.enabled && !report.telegram.paired) next.push("텔레그램 봇이 켜져 있지만 아직 연결 안 됐어요. docent telegram pair 로 연결 링크를 만드세요.");
 	report.ok = report.node.ok && report.omp.found && Boolean(report.omp.chatModels) && (report.probe ? report.probe.ok : true);
 	report.next = next;
 	return report;
@@ -104,6 +113,12 @@ export function formatReport(report) {
 	lines.push(report.server.running
 		? `[ok] 서버 ${report.server.url} (${report.server.version ? `v${report.server.version}` : "0.17 이전 버전"}), 세션 ${sessions || "없음"}`
 		: `[--] 서버 꺼짐 (${report.server.url})`);
+	if (report.telegram) {
+		const bot = report.telegram;
+		lines.push(!bot.enabled ? "[--] 텔레그램 봇 꺼짐 (선택 사항)"
+			: bot.paired ? `[ok] 텔레그램 봇 @${bot.username} 연결됨`
+			: "[!!] 텔레그램 봇 켜짐, 아직 연결 안 됨: docent telegram pair");
+	}
 	lines.push(`[--] Jev 자동 선별 키 ${report.jev.configured ? "있음" : "없음 (선택 사항)"}, 이 셸의 환경변수 기준`);
 	if (report.next.length) lines.push("", "다음에 할 일:", ...report.next.map((step) => `- ${step}`));
 	else lines.push("", "준비됐어요. docent 를 실행하면 브라우저가 열려요.");

@@ -18,7 +18,9 @@ import { glossary } from "./review.mjs";
 import { KEYWORD_PROMPT, extractInput, parseExtract, wiki } from "./wiki.mjs";
 import { parsePeers, peerProvider } from "./peers.mjs";
 import { sshAliasFor } from "./ssh-aliases.mjs";
-import { config, favorites, history, saveConfig, saveKeywords, setFavorite } from "./store.mjs";
+import { DOCENT_HOME, config, favorites, history, saveConfig, saveKeywords, setFavorite } from "./store.mjs";
+import { createTelegramBot } from "./telegram-bot.mjs";
+import { telegramApi } from "./telegram-api.mjs";
 import { resolveEvidence } from "./evidence.mjs";
 import { modelCatalog, selectedModel } from "./models.mjs";
 import { sessionModel } from "./session-model.mjs";
@@ -211,6 +213,30 @@ async function evidenceFor(sessionId, ref, profileId) {
 	return { available: false, message: "원본 전사가 없거나 변경되어 원문을 열 수 없어요. 아래는 이 프로필의 답변에 저장된 당시 발췌예요.", selected: { id: saved.id, text: saved.excerpt, role: saved.role, timestamp: saved.timestamp, agent: saved.agent }, before: [], after: [] };
 }
 
+// 도슨트 봇 (ADR 0076). 토큰이 환경변수로 있을 때만 켠다. 토큰은 config.json 에도 로그에도 두지 않는다.
+const bot = process.env.DOCENT_TELEGRAM_TOKEN
+	? createTelegramBot({
+		api: telegramApi({ token: process.env.DOCENT_TELEGRAM_TOKEN }),
+		config: { owner: Number.isSafeInteger(CONFIG.telegram?.owner) ? CONFIG.telegram.owner : null, profileId: CONFIG.telegram?.profileId ?? "default" },
+		statePath: join(DOCENT_HOME, "telegram.json"),
+		pairPath: join(DOCENT_HOME, "telegram-pair.json"),
+		ports: {
+			listSessions: () => catalog.list(),
+			subscribe: (input) => hub.subscribe(input),
+			open: (input) => asks.open(input),
+			cancel: (input) => asks.cancel(input),
+			steer: (input) => asks.steer(input),
+			history,
+			evidence: evidenceFor,
+			profile,
+			saveOwner: async (id) => {
+				const next = await saveConfig({ telegram: { ...(CONFIG.telegram ?? {}), owner: id } });
+				CONFIG.telegram = next.telegram;
+			},
+		},
+	})
+	: null;
+
 // 새 버전 확인과 설치 (ADR 0072). 설치는 서버를 연 이 컴퓨터에서, 이 컴퓨터의 주소로 온 요청만 한다.
 // 테일스케일이나 다른 기기에서 온 요청, 다른 사이트가 브라우저로 보낸 요청(Origin)은 거절한다.
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -308,6 +334,7 @@ const handler = async (req, res) => {
 			res.writeHead(200, { "content-type": asset[1], "cache-control": asset[2] ?? "no-cache", "x-content-type-options": "nosniff" });
 			return res.end(content);
 		}
+		if (req.method === "GET" && url.pathname === "/api/bot") return json(res, 200, bot ? bot.status() : { enabled: false });
 		if (req.method === "GET" && url.pathname === "/api/host") return json(res, 200, hostStatus());
 		if (req.method === "POST" && url.pathname === "/api/host") {
 			const input = await body(req);
@@ -419,7 +446,7 @@ function listenOn(h) {
 		server.listen(PORT, h, () => {
 			listeners.set(h, server);
 			const peers = Object.keys(PEERS);
-			console.log(`docent: http://${h}:${PORT}/  (prompt: ${PROMPT}, jev: ${jevEnabled ? "on" : "off"}${peers.length ? `, peers: ${peers.join(" ")}` : ""})`);
+			console.log(`docent: http://${h}:${PORT}/  (prompt: ${PROMPT}, jev: ${jevEnabled ? "on" : "off"}, telegram: ${bot ? "on" : "off"}${peers.length ? `, peers: ${peers.join(" ")}` : ""})`);
 			res(server);
 		});
 	});
@@ -484,8 +511,9 @@ async function setTailscaleShare(on) {
 }
 
 const baseHosts = HOST === "127.0.0.1" ? [HOST] : [...new Set([HOST, "127.0.0.1"])];
+const opened = [];
 for (const h of baseHosts) {
-	listenOn(h).then(() => {
+	opened.push(listenOn(h).then(() => {
 		// Windows 의 start 는 명령이 아니라 cmd 의 내장 명령이므로 cmd 로 부른다.
 		const openers = { darwin: ["open"], win32: ["cmd", "/c", "start", ""], linux: ["xdg-open"] };
 		const opener = openers[process.platform];
@@ -495,8 +523,10 @@ for (const h of baseHosts) {
 	}, (error) => {
 		console.error(`docent: ${h}:${PORT} 을 열 수 없어요 (${error.message})`);
 		process.exit(1);
-	});
+	}));
 }
+// 리스너가 열린 뒤 봇을 시작한다. 기다리지 않고, 실패해도 서버는 계속 돈다.
+Promise.all(opened).then(() => bot?.start()).catch((error) => console.error(`docent: 도슨트 봇을 시작하지 못했어요 (${error?.message ?? error})`));
 // 옛 host=tailscale 설정이나 설정창에서 켜 둔 공유(tailscale 참)는 loopback 과 따로 연다. 실패해도 loopback 은 살아 있다.
 if (HOST_INPUT === "tailscale" || CONFIG.tailscale === true) keepOpeningTailscale();
 
@@ -506,6 +536,7 @@ async function shutdown() {
 	if (stopping) return;
 	stopping = true;
 	for (const server of listeners.values()) server.close();
+	await bot?.stop();
 	// 작업을 먼저 중단해야 요청이 실패가 아니라 중단으로 남는다.
 	const stopped = asks.close();
 	await Promise.allSettled([runner.close(), stopped]);
