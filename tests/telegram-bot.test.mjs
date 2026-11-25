@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
@@ -1199,4 +1199,28 @@ test("더 새 버전을 알린 뒤에는 하루 확인이 그 버전을 다시 �
 	await again.startBot();
 	await until(() => again.ports.checks.length >= 2, "재시작 뒤 확인");
 	assert.equal(noticesOf(again).length, 0);
+});
+
+test("표식을 쓰지 못해도 이전 표식은 지워지지 않는다", { skip: (process.platform === "win32" && "Windows 는 폴더 권한으로 쓰기를 막지 못한다") || (process.getuid?.() === 0 && "root 는 읽기 전용 디렉터리에도 쓴다") }, async (t) => {
+	const previous = { from: "0.33.0", to: "0.34.0", at: T0 };
+	const h = await setup(t, { state: { version: "0.33.0", update: previous } });
+	h.ports.updateInfo = { ...NEW };
+	// 시작 보고를 못 보내면 표식이 메모리에 남는다. 디렉터리를 읽기 전용으로 두어 처음부터 모든 쓰기를 막는다.
+	h.api.handlers.sendMessage = async (_params, count) => {
+		if (count === 1) throw Object.assign(new Error("보내기 실패"), { status: 500 });
+	};
+	await chmod(h.dir, 0o500);
+	try {
+		await h.startBot();
+		const notice = await noticeVia(h);
+		await h.send(h.cb(dataOf(notice, "설치"), 1));
+		await h.text("상태를 저장하지 못해 설치하지 않았어요");
+		assert.equal(h.ports.installs.length, 0);
+	} finally {
+		await chmod(h.dir, 0o700);
+	}
+	// 쓰기가 되살아난 뒤 다음 저장에 이전 표식이 그대로 실려야 한다.
+	await h.send(h.msg("/status"));
+	await until(async () => (await readState(h)).offset > 0, "상태 저장");
+	assert.deepEqual((await readState(h)).update, previous);
 });

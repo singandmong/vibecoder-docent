@@ -965,13 +965,14 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 			if (info.latest !== button.version) return void (await sendUpdateNotice(info, { prefix: "더 새 버전이 있어요." }));
 			if (!info.installable) return void (await sendText(`여기서는 올릴 수 없어요: ${info.reason}`));
 			// 표식은 실패를 삼키는 save() 가 아니라 직접 쓴다. 못 쓰면 설치하지 않는다.
+			const previous = state.update;
 			state.update = { from: ports.version, to: info.latest, at: now() };
 			try {
 				const written = saving.then(() => writeJsonAtomic(statePath, state));
 				saving = written.catch(() => {});
 				await written;
 			} catch (error) {
-				state.update = null;
+				state.update = previous; // 이전 표식(예: 시작 보고를 못 보내 남은 것)을 지우지 않는다
 				logError("설치 표식을 저장하지 못했어요", error);
 				return void (await sendText("상태를 저장하지 못해 설치하지 않았어요. 맥에서 docent doctor 로 확인해 주세요."));
 			}
