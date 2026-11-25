@@ -83,3 +83,15 @@ test("peerHealth 는 연결이 안 되어도 던지지 않는다", async () => {
 	await once(server, "close");
 	assert.deepEqual(await peerHealth("book", `http://127.0.0.1:${port}`), { name: "book", version: null });
 });
+
+test("peerHealth 는 응답이 없으면 제한 시간 안에 null 로 끝난다", async (t) => {
+	const sockets = new Set();
+	const server = createServer(() => { /* 연결만 받고 답하지 않는다 */ });
+	server.on("connection", (socket) => sockets.add(socket));
+	server.listen(0, "127.0.0.1");
+	await once(server, "listening");
+	t.after(() => { for (const socket of sockets) socket.destroy(); server.close(); });
+	const started = Date.now();
+	assert.deepEqual(await peerHealth("book", `http://127.0.0.1:${server.address().port}`, { timeoutMs: 200 }), { name: "book", version: null });
+	assert.ok(Date.now() - started < 2000);
+});

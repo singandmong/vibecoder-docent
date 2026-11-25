@@ -914,6 +914,7 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 		} else lines.push(`여기서는 올릴 수 없어요: ${info.reason}`);
 		lines.push(...(await peerLines(info.latest)));
 		const sent = await sendText(lines.join("\n"), extra);
+		if (sent !== null) state.notifiedVersion = info.latest; // 보냈을 때만 같은 버전을 다시 알리지 않는다
 		await save();
 		return sent;
 	}
@@ -927,11 +928,7 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 			return;
 		}
 		if (!info?.available || state.notifiedVersion === info.latest) return;
-		const sent = await sendUpdateNotice(info);
-		if (sent !== null) {
-			state.notifiedVersion = info.latest;
-			await save();
-		}
+		await sendUpdateNotice(info);
 	}
 
 	async function updateLoop() {
@@ -950,11 +947,7 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 			return void (await sendText(`새 버전을 확인하지 못했어요: ${redactToken(error?.message ?? error, secret())}`));
 		}
 		if (!info.available) return void (await sendText([`최신 버전이에요 (v${info.current}).`, ...(await peerLines(info.current))].join("\n")));
-		const sent = await sendUpdateNotice(info);
-		if (sent !== null) {
-			state.notifiedVersion = info.latest;
-			await save();
-		}
+		await sendUpdateNotice(info);
 	}
 
 	async function installFromButton(button) {
@@ -971,8 +964,17 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 			if (!info.available) return void (await sendText(`이미 최신 버전이에요 (v${info.current}).`));
 			if (info.latest !== button.version) return void (await sendUpdateNotice(info, { prefix: "더 새 버전이 있어요." }));
 			if (!info.installable) return void (await sendText(`여기서는 올릴 수 없어요: ${info.reason}`));
+			// 표식은 실패를 삼키는 save() 가 아니라 직접 쓴다. 못 쓰면 설치하지 않는다.
 			state.update = { from: ports.version, to: info.latest, at: now() };
-			await save();
+			try {
+				const written = saving.then(() => writeJsonAtomic(statePath, state));
+				saving = written.catch(() => {});
+				await written;
+			} catch (error) {
+				state.update = null;
+				logError("설치 표식을 저장하지 못했어요", error);
+				return void (await sendText("상태를 저장하지 못해 설치하지 않았어요. 맥에서 docent doctor 로 확인해 주세요."));
+			}
 			await sendText(`v${info.latest} 설치를 시작해요. 다시 켜지면 결과를 알려 드려요. 5분이 지나도 소식이 없으면 맥에서 docent doctor 로 확인해 주세요.`);
 			let result;
 			try {
@@ -1001,14 +1003,14 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 	async function reportVersion() {
 		const prev = state.version;
 		const pending = state.update;
-		state.version = ports.version;
-		state.update = null;
-		await save();
-		if (owner === null) return;
 		let text = null;
 		if (prev && prev !== ports.version) text = `도슨트 버전이 바뀌었어요: v${prev} → v${ports.version}`;
 		else if (pending && pending.from === ports.version) text = `v${pending.to} 설치가 끝나지 않았어요. 지금 버전: v${ports.version}. 맥에서 docent doctor 로 확인해 주세요.`;
-		if (text) await sendText(text);
+		// 알릴 말이 있으면 보내기에 성공했을 때만 기록한다. 실패하면 다음 시작이 다시 알린다.
+		if (text && owner !== null && (await sendText(text)) === null) return;
+		state.version = ports.version;
+		state.update = null;
+		await save();
 	}
 
 	// 수명 ------------------------------------------------------------------

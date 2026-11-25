@@ -307,6 +307,8 @@ async function updateStatus(req, fresh) {
 async function performUpdate({ expect } = {}) {
 	if (updating) throw httpError(409, "이미 업데이트하고 있어요.");
 	updating = true;
+	// 설치가 끝나면 서버가 곧 내려가므로, 그 사이 다른 요청이 두 번째 설치를 시작하지 못하게 플래그를 그대로 둔다.
+	let installed = false;
 	try {
 		const prefix = await installPrefix();
 		if (!prefix) throw httpError(403, NPM_GLOBAL_ONLY);
@@ -315,16 +317,18 @@ async function performUpdate({ expect } = {}) {
 		if (expect !== undefined && expect !== latest.latest) return { updated: false, current: VERSION, latest: latest.latest };
 		if (!latest.installable) throw httpError(409, latest.reason);
 		await installRelease({ url: latest.url, sha256: latest.sha256, prefix });
+		installed = true;
 		// 응답을 보낸 뒤 이 서버를 끝낸다. 관리자(launchd 등)가 없으면 떨어진 프로세스가 새 파일로 다시 켠다.
 		const restart = scheduleRestart({ port: PORT });
 		setTimeout(() => void shutdown(), 400).unref?.();
 		return { updated: true, from: VERSION, to: latest.latest, restart };
 	} finally {
-		updating = false;
+		if (!installed) updating = false;
 	}
 }
 
 async function applyUpdate(req) {
+	if (updating) throw httpError(409, "이미 업데이트하고 있어요.");
 	if (!localRequest(req)) throw httpError(403, LOOPBACK_ONLY);
 	return performUpdate();
 }

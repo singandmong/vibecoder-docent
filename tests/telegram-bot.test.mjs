@@ -170,15 +170,16 @@ function fakePorts() {
 	return p;
 }
 
-async function setup(t, { owner = OWNER, timing = {}, dir: given, state, pair } = {}) {
+async function setup(t, { owner = OWNER, timing = {}, dir: given, state, pair, blocked = false } = {}) {
 	const dir = given ?? (await mkdtemp(join(tmpdir(), "tgbot-")));
 	const cleanups = [];
 	t.after(async () => {
 		for (const fn of cleanups) await fn();
 		await rm(dir, { recursive: true, force: true });
 	});
-	const statePath = join(dir, "telegram.json");
+	const statePath = blocked ? join(dir, "blocker", "telegram.json") : join(dir, "telegram.json");
 	const pairPath = join(dir, "telegram-pair.json");
+	if (blocked) await writeFile(join(dir, "blocker"), "파일이에요");
 	if (state !== undefined) await writeFile(statePath, typeof state === "string" ? state : JSON.stringify(state));
 	if (pair) await writeFile(pairPath, JSON.stringify(pair));
 	const api = fakeApi();
@@ -1153,4 +1154,49 @@ test("손상된 상태 필드는 버리고 시작한다", async (t) => {
 	assert.equal(state.notifiedVersion, null);
 	assert.equal(state.update, null);
 	assert.equal(odd.api.texts().length, 0);
+});
+
+test("시작 보고를 보내지 못하면 기록을 바꾸지 않고 다음 시작이 한 번 알린다", async (t) => {
+	const h = await setup(t, { state: { version: "0.32.0" } });
+	h.api.handlers.sendMessage = async () => { throw Object.assign(new Error("보내기 실패"), { status: 500 }); };
+	await h.startBot();
+	assert.ok(h.api.of("sendMessage").length >= 1);
+	assert.equal((await readState(h)).version, "0.32.0");
+	await h.bot.stop();
+
+	const again = await setup(t, { dir: h.dir });
+	await again.startBot();
+	await again.text("도슨트 버전이 바뀌었어요: v0.32.0 → v0.33.0");
+	assert.equal(again.api.texts().filter((x) => x.includes("바뀌었어요")).length, 1);
+	assert.equal((await readState(again)).version, "0.33.0");
+});
+
+test("설치 표식을 저장하지 못하면 installUpdate 를 부르지 않고 알린다", async (t) => {
+	// 상태 파일의 부모가 일반 파일이라 처음부터 모든 쓰기가 실패한다(읽기는 빈 상태로 시작).
+	const h = await setup(t, { blocked: true });
+	h.ports.updateInfo = { ...NEW };
+	await h.startBot();
+	const notice = await noticeVia(h);
+	await h.send(h.cb(dataOf(notice, "설치"), 1));
+	await h.text("상태를 저장하지 못해 설치하지 않았어요");
+	assert.equal(h.ports.installs.length, 0);
+	assert.ok(!h.api.texts().some((x) => x.includes("설치를 시작해요")));
+});
+
+test("더 새 버전을 알린 뒤에는 하루 확인이 그 버전을 다시 알리지 않는다", async (t) => {
+	const h = await setup(t);
+	h.ports.updateInfo = { ...NEW };
+	await h.startBot();
+	const notice = await noticeVia(h);
+	h.ports.updateInfo = { ...NEW, latest: "0.35.0" };
+	await h.send(h.cb(dataOf(notice, "설치"), 1));
+	await until(() => noticesOf(h).find((c) => c.params.text.includes("더 새 버전이 있어요")), "새 알림");
+	await until(async () => (await readState(h)).notifiedVersion === "0.35.0", "notifiedVersion 저장");
+	await h.bot.stop();
+
+	const again = await setup(t, { dir: h.dir, timing: FAST });
+	again.ports.updateInfo = { ...NEW, latest: "0.35.0" };
+	await again.startBot();
+	await until(() => again.ports.checks.length >= 2, "재시작 뒤 확인");
+	assert.equal(noticesOf(again).length, 0);
 });
