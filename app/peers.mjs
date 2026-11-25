@@ -29,31 +29,52 @@ export function cleanPeerSession(value) {
 	return out;
 }
 
+/** 본문을 max 바이트까지만 읽는다. 넘으면 끊고 오류로 알린다. */
+async function readCappedBody(name, r, max) {
+	const declared = Number(r.headers?.get?.("content-length") ?? 0);
+	if (declared > max) throw new Error(`${name}: 응답이 너무 커요`);
+	if (!r.body) {
+		const text = await r.text();
+		if (Buffer.byteLength(text) > max) throw new Error(`${name}: 응답이 너무 커요`);
+		return text;
+	}
+	const chunks = [];
+	let size = 0;
+	for await (const chunk of r.body) {
+		size += chunk.length;
+		if (size > max) {
+			try { await r.body.cancel?.(); } catch { /* 이미 끊겼을 수 있다 */ }
+			throw new Error(`${name}: 응답이 너무 커요`);
+		}
+		chunks.push(Buffer.from(chunk));
+	}
+	return Buffer.concat(chunks).toString("utf8");
+}
+
+const HEALTH_MAX_BYTES = 4096;
+
+/**
+ * 다른 컴퓨터 docent 의 /api/health 에서 버전만 읽는다. 읽지 못하거나 모양이 다르면 version 은 null 이다. 던지지 않는다.
+ * @returns {Promise<{ name: string, version: string | null }>}
+ */
+export async function peerHealth(name, base, { fetch = globalThis.fetch, timeoutMs = 3000 } = {}) {
+	try {
+		const r = await fetch(`${base.replace(/\/$/, "")}/api/health`, { signal: AbortSignal.timeout(timeoutMs), redirect: "manual" });
+		if (!r.ok) return { name, version: null };
+		const body = JSON.parse(await readCappedBody(name, r, HEALTH_MAX_BYTES));
+		const version = body?.app === "vibecoder-docent" && typeof body.version === "string" && /^\d+\.\d+\.\d+$/.test(body.version) ? body.version : null;
+		return { name, version };
+	} catch {
+		return { name, version: null };
+	}
+}
+
 /** `fetch` 는 HTTP 연결 자리, `ssh(name, base)` 는 그 컴퓨터에 닿는 이 컴퓨터의 ssh 별칭을 찾는 자리다(ssh-aliases.mjs, ADR 0067). 시험은 메모리 안의 가짜를 넘긴다. */
 export function peerProvider(name, base, { fetch = globalThis.fetch, ssh = null } = {}) {
 	const prefix = `@${name}/`;
 	const url = (path, sid) => `${base.replace(/\/$/, "")}${path}?id=${encodeURIComponent(sid.slice(prefix.length))}`;
 	/** 본문을 max 바이트까지만 읽는다. 넘으면 끊고 오류로 알린다. */
-	const readCapped = async (r, max) => {
-		const declared = Number(r.headers?.get?.("content-length") ?? 0);
-		if (declared > max) throw new Error(`${name}: 응답이 너무 커요`);
-		if (!r.body) {
-			const text = await r.text();
-			if (Buffer.byteLength(text) > max) throw new Error(`${name}: 응답이 너무 커요`);
-			return text;
-		}
-		const chunks = [];
-		let size = 0;
-		for await (const chunk of r.body) {
-			size += chunk.length;
-			if (size > max) {
-				try { await r.body.cancel?.(); } catch { /* 이미 끊겼을 수 있다 */ }
-				throw new Error(`${name}: 응답이 너무 커요`);
-			}
-			chunks.push(Buffer.from(chunk));
-		}
-		return Buffer.concat(chunks).toString("utf8");
-	};
+	const readCapped = (r, max) => readCappedBody(name, r, max);
 	const get = async (u, ms) => {
 		// 그쪽 서버가 다른 주소로 돌려도 따라가지 않는다. 우리 서버를 통해 다른 곳을 부르는 통로가 되면 안 된다.
 		const r = await fetch(u, { signal: AbortSignal.timeout(ms), redirect: "manual" });

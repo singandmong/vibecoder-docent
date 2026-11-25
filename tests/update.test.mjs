@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkLatest, installPrefix, installRelease, isNewer, parseVersion } from "../app/update.mjs";
+import { checkLatest, installPrefix, installRelease, isNewer, npmEnv, parseVersion } from "../app/update.mjs";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { fixture } from "./omp-fixture.mjs";
@@ -83,4 +83,13 @@ test("the server reports a newer release but refuses to install when it was not 
 	const applied = await f.api("/api/update", "POST", { apply: true });
 	assert.equal(applied.status, 403);
 	assert.equal((await f.api("/api/health")).body.version.startsWith("99"), false, "nothing was installed");
+});
+
+test("npmEnv 는 텔레그램 토큰만 빼고 나머지를 그대로 넘기며 원본을 바꾸지 않는다", () => {
+	const input = { PATH: "/bin", HOME: "/h", DOCENT_TELEGRAM_TOKEN: "secret-token", DOCENT_PORT: "4747" };
+	const out = npmEnv(input);
+	assert.equal("DOCENT_TELEGRAM_TOKEN" in out, false);
+	assert.deepEqual(out, { PATH: "/bin", HOME: "/h", DOCENT_PORT: "4747" });
+	assert.equal(input.DOCENT_TELEGRAM_TOKEN, "secret-token");
+	assert.equal("DOCENT_TELEGRAM_TOKEN" in npmEnv({ PATH: "/bin" }), false);
 });

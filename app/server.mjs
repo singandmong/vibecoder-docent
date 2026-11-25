@@ -16,7 +16,7 @@ import { localProviders, sessionCatalog } from "./catalog.mjs";
 import { herdrWorkspaces } from "./herdr-workspaces.mjs";
 import { glossary } from "./review.mjs";
 import { KEYWORD_PROMPT, extractInput, parseExtract, wiki } from "./wiki.mjs";
-import { parsePeers, peerProvider } from "./peers.mjs";
+import { parsePeers, peerHealth, peerProvider } from "./peers.mjs";
 import { sshAliasFor } from "./ssh-aliases.mjs";
 import { DOCENT_HOME, config, favorites, history, saveConfig, saveKeywords, setFavorite } from "./store.mjs";
 import { createTelegramBot } from "./telegram-bot.mjs";
@@ -233,6 +233,14 @@ const bot = process.env.DOCENT_TELEGRAM_TOKEN
 				const next = await saveConfig({ telegram: { ...(CONFIG.telegram ?? {}), owner: id } });
 				CONFIG.telegram = next.telegram;
 			},
+			version: VERSION,
+			checkUpdate: async ({ fresh }) => {
+				const { current, latest, available, installable, reason } = await latestRelease(Boolean(fresh));
+				if (available && !(await installPrefix())) return { current, latest, available, installable: false, reason: NPM_GLOBAL_ONLY };
+				return { current, latest, available, installable, ...(reason ? { reason } : {}) };
+			},
+			installUpdate: ({ expect }) => performUpdate({ expect }),
+			peerVersions: () => Promise.all(Object.entries(PEERS).map(([name, base]) => peerHealth(name, base))),
 		},
 	})
 	: null;
@@ -277,9 +285,11 @@ function localRequest(req) {
 	return fromHere && LOOPBACK_HOSTS.has(host) && originOk;
 }
 const latestRelease = (fresh) => checkLatest({ current: VERSION, fresh });
+const LOOPBACK_ONLY = "업데이트는 서버를 켠 컴퓨터에서 이 컴퓨터의 주소로 연 화면에서만 할 수 있어요.";
+const NPM_GLOBAL_ONLY = "npm 전역으로 설치한 도슨트만 업데이트할 수 있어요. 저장소에서 실행 중이면 git pull 로, macOS 앱은 앱을 다시 설치하세요.";
 const installBlock = async (req) => {
-	if (!localRequest(req)) return "업데이트는 서버를 켠 컴퓨터에서 이 컴퓨터의 주소로 연 화면에서만 할 수 있어요.";
-	if (!(await installPrefix())) return "npm 전역으로 설치한 도슨트만 업데이트할 수 있어요. 저장소에서 실행 중이면 git pull 로, macOS 앱은 앱을 다시 설치하세요.";
+	if (!localRequest(req)) return LOOPBACK_ONLY;
+	if (!(await installPrefix())) return NPM_GLOBAL_ONLY;
 	return null;
 };
 let updating = false;
@@ -290,16 +300,21 @@ async function updateStatus(req, fresh) {
 	return { ...latest, url: undefined, sha256: undefined, canInstall: latest.installable && !block, ...(block || latest.reason ? { reason: block ?? latest.reason } : {}) };
 }
 
-async function applyUpdate(req) {
+/**
+ * 설치 본체. HTTP(applyUpdate)와 텔레그램 봇(ports.installUpdate)이 같이 쓴다. 누가 불렀는지는 호출한 쪽이 확인한다.
+ * `expect` 가 있으면 지금 최신이 그 버전일 때만 설치한다.
+ */
+async function performUpdate({ expect } = {}) {
 	if (updating) throw httpError(409, "이미 업데이트하고 있어요.");
-	const block = await installBlock(req);
-	if (block) throw httpError(403, block);
 	updating = true;
 	try {
+		const prefix = await installPrefix();
+		if (!prefix) throw httpError(403, NPM_GLOBAL_ONLY);
 		const latest = await latestRelease(true);
 		if (!latest.available) return { updated: false, current: VERSION, latest: latest.latest };
+		if (expect !== undefined && expect !== latest.latest) return { updated: false, current: VERSION, latest: latest.latest };
 		if (!latest.installable) throw httpError(409, latest.reason);
-		await installRelease({ url: latest.url, sha256: latest.sha256, prefix: await installPrefix() });
+		await installRelease({ url: latest.url, sha256: latest.sha256, prefix });
 		// 응답을 보낸 뒤 이 서버를 끝낸다. 관리자(launchd 등)가 없으면 떨어진 프로세스가 새 파일로 다시 켠다.
 		const restart = scheduleRestart({ port: PORT });
 		setTimeout(() => void shutdown(), 400).unref?.();
@@ -307,6 +322,11 @@ async function applyUpdate(req) {
 	} finally {
 		updating = false;
 	}
+}
+
+async function applyUpdate(req) {
+	if (!localRequest(req)) throw httpError(403, LOOPBACK_ONLY);
+	return performUpdate();
 }
 
 const handler = async (req, res) => {

@@ -81,8 +81,15 @@ export async function installPrefix(root = PACKAGE_ROOT) {
 	return basename(above) === "lib" ? dirname(above) : null;
 }
 
+/** npm 자식 프로세스에 넘길 환경. 텔레그램 토큰은 빼고 넘긴다(runner.mjs 가 omp 에 하는 것과 같다). */
+export function npmEnv(env = process.env) {
+	const copy = { ...env };
+	delete copy.DOCENT_TELEGRAM_TOKEN;
+	return copy;
+}
+
 const npmInstall = (args) => new Promise((done, fail) => {
-	execFile("npm", args, { timeout: INSTALL_TIMEOUT_MS, shell: process.platform === "win32", env: process.env }, (error, _stdout, stderr) => {
+	execFile("npm", args, { timeout: INSTALL_TIMEOUT_MS, shell: process.platform === "win32", env: npmEnv() }, (error, _stdout, stderr) => {
 		if (error) fail(new Error(String(stderr || error.message).trim().split("\n").slice(-3).join(" ")));
 		else done();
 	});

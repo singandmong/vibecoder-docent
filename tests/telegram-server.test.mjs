@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
@@ -205,4 +206,26 @@ test("짝짓기: 틀린 코드는 저장하지 않고 답하지 않는다", asyn
 	await delay(800);
 	assert.equal(await configOwner(f), undefined);
 	assert.equal(api.count("sendMessage"), 0);
+});
+
+test("/update: 새 버전이 있어도 저장소 실행이면 올릴 수 없다고 알리고 버튼을 달지 않는다", async (t) => {
+	const sha = createHash("sha256").update("fake tgz").digest("hex");
+	const release = { tag_name: "v99.0.0", draft: false, prerelease: false, published_at: "2026-10-18T00:00:00Z", assets: [{ name: "vibecoder-docent-99.0.0.tgz", digest: `sha256:${sha}`, browser_download_url: "https://github.com/singandmong/vibecoder-docent/releases/download/v99.0.0/vibecoder-docent-99.0.0.tgz" }] };
+	const fakeRelease = createServer((req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(release)); });
+	fakeRelease.listen(0, "127.0.0.1");
+	await once(fakeRelease, "listening");
+	t.after(() => { fakeRelease.closeAllConnections(); fakeRelease.close(); });
+	const before = process.env.DOCENT_UPDATE_API;
+	process.env.DOCENT_UPDATE_API = `http://127.0.0.1:${fakeRelease.address().port}/latest`;
+	t.after(() => { if (before === undefined) delete process.env.DOCENT_UPDATE_API; else process.env.DOCENT_UPDATE_API = before; });
+	const api = await fakeTelegram(t);
+	const f = await fixture(t, withBot(api, ownerConfig()));
+	await followingUp(f);
+	const version = (await f.api("/api/health")).body.version;
+	api.push(42, "/update");
+	await until(() => api.sent().some((text) => text.includes("99.0.0")), 15000);
+	const call = api.calls.find((c) => c.method === "sendMessage" && String(c.body.text).includes("99.0.0"));
+	assert.match(call.body.text, /npm 전역/);
+	assert.equal(call.body.reply_markup?.inline_keyboard, undefined);
+	assert.equal((await f.api("/api/health")).body.version, version, "nothing was installed");
 });
