@@ -7,6 +7,7 @@ import { EXPLAIN_ACTIONS } from "./conversations.mjs";
 import { EVENT_REQUEST } from "./dialogue.mjs";
 import { writeJsonAtomic } from "./store.mjs";
 import { redactToken } from "./telegram-api.mjs";
+import { isNewer } from "./update.mjs";
 import { answerMessages, cardText, sourceText } from "./telegram-format.mjs";
 
 const MESSAGES_MAX = 300;
@@ -30,9 +31,9 @@ const ALLOWED_UPDATES = ["message", "callback_query", "stopped_message_generatio
  * @property {number} [pollTimeout=50] getUpdates 긴 대기 시간(초)
  * @property {number} [requestTimeoutMs=65000] getUpdates 요청 시간 제한
  */
-const TIMING = { followMs: 60_000, chunkGapMs: 1100, draftMs: 1500, backoffMs: [1000, 2000, 5000, 10_000, 30_000], conflictMs: 60_000, retryUnitMs: 1000, pollTimeout: 50, requestTimeoutMs: 65_000 };
+const TIMING = { followMs: 60_000, chunkGapMs: 1100, draftMs: 1500, backoffMs: [1000, 2000, 5000, 10_000, 30_000], conflictMs: 60_000, retryUnitMs: 1000, pollTimeout: 50, requestTimeoutMs: 65_000, updateFirstMs: 60_000, updateMs: 86_400_000 };
 
-const ALIASES = { 시작: "start", 세션: "session", 카드: "cards", 중단: "stop", 바로잡기: "steer", 상태: "status", 도움말: "help" };
+const ALIASES = { 시작: "start", 세션: "session", 카드: "cards", 중단: "stop", 바로잡기: "steer", 상태: "status", 도움말: "help", 업데이트: "update" };
 const COMMANDS = [
 	{ command: "start", description: "시작하기" },
 	{ command: "session", description: "따라갈 세션 고르기" },
@@ -41,6 +42,7 @@ const COMMANDS = [
 	{ command: "steer", description: "지금 설명 바로잡기" },
 	{ command: "status", description: "지금 상태 보기" },
 	{ command: "help", description: "쓰는 방법 보기" },
+	{ command: "update", description: "새 버전 확인하고 올리기" },
 ];
 const HELP = `도슨트 봇이에요. 글로 물어보면 따라가는 세션을 쉽게 설명해 드려요.
 카드 알림의 답장이나 버튼으로 그 카드에 대해 이어서 물을 수 있어요.
@@ -50,7 +52,8 @@ const HELP = `도슨트 봇이에요. 글로 물어보면 따라가는 세션을
 /stop 지금 설명 멈추기
 /steer 문장: 지금 설명 바로잡기
 /status 지금 상태 보기
-/help 이 안내`;
+/help 이 안내
+/update 새 버전 확인하고 올리기`;
 
 const clip = (text, max) => {
 	const chars = [...String(text ?? "")];
@@ -60,9 +63,10 @@ const validMs = (value) => {
 	const ms = typeof value === "number" ? value : Date.parse(value);
 	return Number.isFinite(ms) ? ms : null;
 };
+const VERSION = { test: (value) => typeof value === "string" && /^\d+\.\d+\.\d+$/.test(value) };
 
 function emptyState() {
-	return { offset: 0, following: null, lastCardAt: {}, messages: [], focuses: {}, buttons: {}, next: 1 };
+	return { offset: 0, following: null, lastCardAt: {}, messages: [], focuses: {}, buttons: {}, next: 1, version: undefined, notifiedVersion: null, update: null };
 }
 
 function sameCode(a, b) {
@@ -103,6 +107,7 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 	let draftSeq = 0;
 	let epoch = 0; // 주인이 바뀔 때마다 올린다. 이전 주인의 작업 출력은 epoch 가 달라 버려진다.
 	let saving = Promise.resolve();
+	let installing = false; // 메모리 플래그. 설치가 성공하면 서버가 곧 끝나므로 되돌리지 않는다.
 	let followLock = Promise.resolve();
 	const seen = new Set(); // 이미 알린 thread
 	const received = []; // 이번 실행에서 받은 카드
@@ -161,6 +166,9 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 			const base = emptyState();
 			if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("객체가 아니에요");
 			state = {
+				version: VERSION.test(raw.version) ? raw.version : undefined,
+				notifiedVersion: VERSION.test(raw.notifiedVersion) ? raw.notifiedVersion : null,
+				update: raw.update && VERSION.test(raw.update.from) && VERSION.test(raw.update.to) && Number.isFinite(raw.update.at) ? { from: raw.update.from, to: raw.update.to, at: raw.update.at } : null,
 				offset: Number.isSafeInteger(raw.offset) ? raw.offset : 0,
 				following: raw.following && typeof raw.following.sessionId === "string" ? { sessionId: raw.following.sessionId, explicit: raw.following.explicit === true } : null,
 				lastCardAt: raw.lastCardAt && typeof raw.lastCardAt === "object" && !Array.isArray(raw.lastCardAt) ? raw.lastCardAt : base.lastCardAt,
@@ -687,7 +695,8 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 			`프로필: ${profile?.name ?? profileId}, 미리 설명 ${profile?.autoExplain ? "켜짐" : "꺼짐"}`,
 			`진행 중 ${active ? 1 : 0}개, 대기 ${queue.length}개`,
 		];
-		await sendText(lines.join("\n"));
+		const peers = await peerLines(null);
+		await sendText([`버전: v${ports.version}`, ...lines, ...peers].join("\n"));
 	}
 
 	async function cancelJob(requestId) {
@@ -725,6 +734,8 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 				}
 				return;
 			}
+			case "update":
+				return updateCommand();
 			case "status":
 				return showStatus();
 			default:
@@ -810,6 +821,8 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 				if (typeof text !== "string" || !text.trim()) return void (await sendText("원문을 찾지 못했어요."));
 				return sendParts(sourceText(text), { replyTo });
 			}
+			case "u":
+				return void detach(installFromButton(button), "업데이트 설치");
 			case "c": {
 				const focus = state.focuses[button.thread];
 				if (!focus) return void (await sendText("오래된 카드라 다시 보여 드리지 못해요."));
@@ -875,6 +888,129 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 		}
 	}
 
+	// 업데이트 --------------------------------------------------------------
+	/** 설정된 peers 의 버전 줄. 읽기에 실패해도 빈 목록을 돌려준다. */
+	async function peerLines(latest) {
+		let peers = [];
+		try {
+			peers = await ports.peerVersions();
+		} catch (error) {
+			logError("peers 버전을 읽지 못했어요", error);
+		}
+		if (!Array.isArray(peers)) return [];
+		return peers.map(({ name, version }) => {
+			if (typeof version !== "string") return `${name}: 버전을 확인하지 못했어요`;
+			if (latest && isNewer(latest, version)) return `${name}: v${version}, ${name}에서 docent update 로 올려 주세요`;
+			return `${name}: v${version}`;
+		});
+	}
+
+	async function sendUpdateNotice(info, { prefix } = {}) {
+		const lines = [`${prefix ? `${prefix} ` : ""}새 버전 v${info.latest}이 나왔어요. 지금은 v${info.current}이에요.`];
+		let extra = {};
+		if (info.installable) {
+			lines.push("누르면 이 컴퓨터의 도슨트를 올리고 다시 켜요. 진행 중인 설명은 멈춰요.");
+			extra = keyboard([[{ text: "설치하고 다시 시작", callback_data: `u:${addButton({ kind: "u", version: info.latest })}` }]]);
+		} else lines.push(`여기서는 올릴 수 없어요: ${info.reason}`);
+		lines.push(...(await peerLines(info.latest)));
+		const sent = await sendText(lines.join("\n"), extra);
+		await save();
+		return sent;
+	}
+
+	async function checkAndNotify() {
+		let info;
+		try {
+			info = await ports.checkUpdate({ fresh: false });
+		} catch (error) {
+			logError("업데이트 확인", error);
+			return;
+		}
+		if (!info?.available || state.notifiedVersion === info.latest) return;
+		const sent = await sendUpdateNotice(info);
+		if (sent !== null) {
+			state.notifiedVersion = info.latest;
+			await save();
+		}
+	}
+
+	async function updateLoop() {
+		await sleep(T.updateFirstMs, { unref: true });
+		while (!stopped) {
+			if (owner !== null) await checkAndNotify().catch((error) => logError("업데이트 확인", error));
+			await sleep(T.updateMs, { unref: true });
+		}
+	}
+
+	async function updateCommand() {
+		let info;
+		try {
+			info = await ports.checkUpdate({ fresh: true });
+		} catch (error) {
+			return void (await sendText(`새 버전을 확인하지 못했어요: ${redactToken(error?.message ?? error, secret())}`));
+		}
+		if (!info.available) return void (await sendText([`최신 버전이에요 (v${info.current}).`, ...(await peerLines(info.current))].join("\n")));
+		const sent = await sendUpdateNotice(info);
+		if (sent !== null) {
+			state.notifiedVersion = info.latest;
+			await save();
+		}
+	}
+
+	async function installFromButton(button) {
+		if (installing) return void (await sendText("이미 올리는 중이에요."));
+		installing = true;
+		let handedOff = false;
+		try {
+			let info;
+			try {
+				info = await ports.checkUpdate({ fresh: true });
+			} catch (error) {
+				return void (await sendText(`새 버전을 확인하지 못했어요: ${redactToken(error?.message ?? error, secret())}`));
+			}
+			if (!info.available) return void (await sendText(`이미 최신 버전이에요 (v${info.current}).`));
+			if (info.latest !== button.version) return void (await sendUpdateNotice(info, { prefix: "더 새 버전이 있어요." }));
+			if (!info.installable) return void (await sendText(`여기서는 올릴 수 없어요: ${info.reason}`));
+			state.update = { from: ports.version, to: info.latest, at: now() };
+			await save();
+			await sendText(`v${info.latest} 설치를 시작해요. 다시 켜지면 결과를 알려 드려요. 5분이 지나도 소식이 없으면 맥에서 docent doctor 로 확인해 주세요.`);
+			let result;
+			try {
+				result = await ports.installUpdate({ expect: info.latest });
+			} catch (error) {
+				state.update = null;
+				await save();
+				return void (await sendText(`올리지 못했어요: ${redactToken(error?.message ?? error, secret())}`));
+			}
+			if (result?.updated === false) {
+				state.update = null;
+				await save();
+				if (result.latest !== info.latest) {
+					const again = await ports.checkUpdate({ fresh: false }).catch(() => null);
+					if (again?.available) return void (await sendUpdateNotice(again, { prefix: "더 새 버전이 있어요." }));
+				}
+				return void (await sendText(`이미 최신 버전이에요 (v${result.current ?? info.current}).`));
+			}
+			handedOff = true; // 성공하면 서버가 곧 끝난다. 플래그는 되돌리지 않는다.
+		} finally {
+			if (!handedOff) installing = false;
+		}
+	}
+
+	/** 시작할 때 한 번: 버전이 바뀌었는지, 설치가 끝나지 않았는지 알린다. */
+	async function reportVersion() {
+		const prev = state.version;
+		const pending = state.update;
+		state.version = ports.version;
+		state.update = null;
+		await save();
+		if (owner === null) return;
+		let text = null;
+		if (prev && prev !== ports.version) text = `도슨트 버전이 바뀌었어요: v${prev} → v${ports.version}`;
+		else if (pending && pending.from === ports.version) text = `v${pending.to} 설치가 끝나지 않았어요. 지금 버전: v${ports.version}. 맥에서 docent doctor 로 확인해 주세요.`;
+		if (text) await sendText(text);
+	}
+
 	// 수명 ------------------------------------------------------------------
 	async function start() {
 		if (started) return;
@@ -903,8 +1039,10 @@ export function createTelegramBot({ api, config, statePath, pairPath, ports, now
 		}
 		if (stopped) return;
 		await api.call("setMyCommands", { commands: COMMANDS }, { signal }).catch((error) => logError("명령 등록 실패", error));
+		await reportVersion();
 		loops.push(detach(pollLoop(), "수신 루프"));
 		loops.push(detach(followLoop(), "세션 따라가기 루프"));
+		loops.push(detach(updateLoop(), "업데이트 확인 루프"));
 		if (owner !== null) await locked(resumeFollow).catch((error) => logError("세션 따라가기를 시작하지 못했어요", error));
 	}
 

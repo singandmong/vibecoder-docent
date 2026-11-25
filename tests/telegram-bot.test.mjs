@@ -147,6 +147,25 @@ function fakePorts() {
 		},
 		profile: async () => ({ name: "기본", autoExplain: true }),
 		async saveOwner(id) { p.saved.push(id); },
+		version: "0.33.0",
+		updateInfo: { current: "0.33.0", latest: "0.33.0", available: false, installable: true },
+		checks: [],
+		installs: [],
+		peers: [],
+		async checkUpdate(arg) {
+			p.checks.push(arg);
+			if (p.checkImpl) return p.checkImpl(arg);
+			return { ...p.updateInfo };
+		},
+		async installUpdate(arg) {
+			p.installs.push(arg);
+			if (p.installImpl) return p.installImpl(arg);
+			return { updated: true, from: p.version, to: arg.expect, restart: "scheduled" };
+		},
+		async peerVersions() {
+			if (p.peersImpl) return p.peersImpl();
+			return p.peers;
+		},
 	};
 	return p;
 }
@@ -174,7 +193,7 @@ async function setup(t, { owner = OWNER, timing = {}, dir: given, state, pair } 
 		ports,
 		now: () => clock.t,
 		log: (...args) => logs.push(args.join(" ")),
-		timing: { followMs: 40, chunkGapMs: 5, draftMs: 10, backoffMs: [10, 10, 10], conflictMs: 60, retryUnitMs: 10, pollTimeout: 1, ...timing },
+		timing: { followMs: 40, chunkGapMs: 5, draftMs: 10, backoffMs: [10, 10, 10], conflictMs: 60, retryUnitMs: 10, pollTimeout: 1, updateFirstMs: 3_600_000, updateMs: 3_600_000, ...timing },
 	});
 	cleanups.push(() => bot.stop());
 	let uid = 0;
@@ -217,12 +236,12 @@ const buttonsOf = (call) => (call.params.reply_markup?.inline_keyboard ?? []).fl
 const dataOf = (call, textPart) => buttonsOf(call).find((b) => b.text.includes(textPart))?.callback_data;
 const answerOf = (extra = {}) => ({ raw: RAW, thread: "", citations: [], ...extra });
 
-test("시작하면 getMe 로 이름을 얻고 명령 7개를 영어 소문자 이름으로 등록한다", async (t) => {
+test("시작하면 getMe 로 이름을 얻고 명령 8개를 영어 소문자 이름으로 등록한다", async (t) => {
 	const h = await setup(t);
 	await h.startBot();
 	assert.equal(h.bot.status().username, "docent_bot");
 	const commands = h.api.of("setMyCommands")[0].params.commands;
-	assert.deepEqual(commands.map((c) => c.command), ["start", "session", "cards", "stop", "steer", "status", "help"]);
+	assert.deepEqual(commands.map((c) => c.command), ["start", "session", "cards", "stop", "steer", "status", "help", "update"]);
 	assert.ok(commands.every((c) => /^[a-z]+$/.test(c.command) && c.description));
 });
 
@@ -819,7 +838,7 @@ test("상태 파일: offset 이 재시작 뒤 이어지고 모양이 계획과 �
 	await a.send(a.msg("질문"));
 	await a.bot.stop();
 	const saved = JSON.parse(await readFile(a.statePath, "utf8"));
-	assert.deepEqual(Object.keys(saved).sort(), ["buttons", "focuses", "following", "lastCardAt", "messages", "next", "offset"]);
+	assert.deepEqual(Object.keys(saved).sort(), ["buttons", "focuses", "following", "lastCardAt", "messages", "next", "notifiedVersion", "offset", "update", "version"]);
 	assert.equal(saved.offset, a.lastId + 1);
 	assert.deepEqual(saved.following, { sessionId: S1.id, explicit: false });
 	assert.equal(typeof saved.lastCardAt[S1.id], "string");
@@ -871,4 +890,267 @@ test("봇이 보내는 문구에 가운뎃점과 엠 대시가 없다", async (t
 	const all = [...h.api.texts(), ...h.api.of("answerCallbackQuery").map((c) => c.params.text ?? ""), ...h.api.of("sendMessage").flatMap((c) => buttonsOf(c).map((b) => b.text))];
 	assert.ok(all.length > 5);
 	assert.ok(all.every((x) => !x.includes("·") && !x.includes("—")));
+});
+
+// 업데이트 (ADR 0077) ----------------------------------------------------------
+const NEW = { current: "0.33.0", latest: "0.34.0", available: true, installable: true };
+const FAST = { updateFirstMs: 15, updateMs: 40 };
+const noticesOf = (h) => h.api.of("sendMessage").filter((c) => c.params.text.includes("새 버전 v"));
+const readState = async (h) => JSON.parse(await readFile(h.statePath, "utf8"));
+
+/** /update 로 알림 하나를 받아 그 호출을 돌려준다. */
+async function noticeVia(h) {
+	const before = noticesOf(h).length;
+	await h.send(h.msg("/update"));
+	return until(() => noticesOf(h)[before], "업데이트 알림");
+}
+
+test("업데이트 확인 루프: 버전당 알림 1개, 같은 버전은 다시 알리지 않고 재시작해도 유지되며 더 새 버전은 알린다", async (t) => {
+	const h = await setup(t, { timing: FAST });
+	h.ports.updateInfo = { ...NEW };
+	h.ports.peers = [{ name: "맥북", version: "0.33.0" }];
+	await h.startBot();
+	const first = await until(() => noticesOf(h)[0], "첫 알림");
+	assert.ok(first.params.text.includes("새 버전 v0.34.0이 나왔어요. 지금은 v0.33.0이에요."));
+	assert.ok(first.params.text.includes("맥북: v0.33.0"));
+	assert.equal(buttonsOf(first).length, 1);
+	assert.match(dataOf(first, "설치하고 다시 시작"), /^u:\d+$/);
+	assert.deepEqual(h.ports.checks[0], { fresh: false });
+	const seen = h.ports.checks.length;
+	await until(() => h.ports.checks.length >= seen + 2, "다음 주기 확인");
+	assert.equal(noticesOf(h).length, 1);
+	h.ports.updateInfo = { ...NEW, latest: "0.35.0" };
+	await until(() => noticesOf(h).length === 2, "더 새 버전 알림");
+	assert.ok(noticesOf(h)[1].params.text.includes("v0.35.0"));
+	await h.bot.stop();
+
+	const again = await setup(t, { dir: h.dir, timing: FAST });
+	again.ports.updateInfo = { ...NEW, latest: "0.35.0" };
+	await again.startBot();
+	await until(() => again.ports.checks.length >= 2, "재시작 뒤 확인");
+	assert.equal(noticesOf(again).length, 0);
+});
+
+test("주인이 없으면 업데이트 확인도 알림도 하지 않는다", async (t) => {
+	const h = await setup(t, { owner: null, timing: FAST });
+	h.ports.updateInfo = { ...NEW };
+	await h.startBot();
+	await sleep(150);
+	assert.equal(noticesOf(h).length, 0);
+	assert.equal(h.api.of("sendMessage").length, 0);
+	assert.equal(h.ports.checks.length, 0);
+});
+
+test("checkUpdate 가 실패해도 메시지는 없고 루프는 계속 돈다", async (t) => {
+	const h = await setup(t, { timing: FAST });
+	h.ports.checkImpl = async () => { throw httpError(502, `확인 실패 ${TOKEN}`); };
+	await h.startBot();
+	await until(() => h.ports.checks.length >= 3, "확인 3회");
+	assert.equal(h.api.of("sendMessage").length, 0);
+	assert.ok(h.logs.some((line) => line.includes("업데이트 확인")));
+	assert.ok(h.logs.every((line) => !line.includes(TOKEN)));
+});
+
+test("올릴 수 없는 설치면 이유가 있고 버튼이 없다", async (t) => {
+	const h = await setup(t, { timing: FAST });
+	h.ports.updateInfo = { ...NEW, installable: false, reason: "npm 전역 설치가 아니라서 올릴 수 없어요" };
+	await h.startBot();
+	const notice = await until(() => noticesOf(h)[0], "알림");
+	assert.ok(notice.params.text.includes("여기서는 올릴 수 없어요: npm 전역 설치가 아니라서 올릴 수 없어요"));
+	assert.deepEqual(buttonsOf(notice), []);
+});
+
+test("/update 와 /업데이트: 최신이면 안내와 peers 줄(확인 실패와 낮은 버전 안내 포함)을 보낸다", async (t) => {
+	const h = await setup(t);
+	h.ports.peers = [{ name: "맥북", version: null }, { name: "미니", version: "0.32.0" }, { name: "서버", version: "0.33.0" }];
+	await h.startBot();
+	for (const word of ["/update", "/업데이트"]) {
+		const before = h.api.texts().length;
+		await h.send(h.msg(word));
+		const text = await until(() => h.api.texts().slice(before)[0], `${word} 답`);
+		assert.ok(text.includes("최신 버전이에요 (v0.33.0)."));
+		assert.ok(text.includes("맥북: 버전을 확인하지 못했어요"));
+		assert.ok(text.includes("미니: v0.32.0, 미니에서 docent update 로 올려 주세요"));
+		assert.ok(text.includes("서버: v0.33.0") && !text.includes("서버에서 docent update"));
+	}
+	assert.deepEqual(h.ports.checks, [{ fresh: true }, { fresh: true }]);
+});
+
+test("/update 가 새 버전을 알리면 같은 버전을 하루 확인이 다시 알리지 않는다", async (t) => {
+	const h = await setup(t, { timing: { updateFirstMs: 120, updateMs: 40 } });
+	h.ports.updateInfo = { ...NEW };
+	await h.startBot();
+	await noticeVia(h);
+	await until(() => h.ports.checks.some((c) => c.fresh === false), "루프 확인");
+	await until(() => h.ports.checks.filter((c) => c.fresh === false).length >= 2, "루프 두 번째 확인");
+	assert.equal(noticesOf(h).length, 1);
+	assert.equal((await readState(h)).notifiedVersion, "0.34.0");
+});
+
+test("/update 확인 실패는 안내하고 토큰을 가린다", async (t) => {
+	const h = await setup(t);
+	h.ports.checkImpl = async () => { throw httpError(502, `GitHub 실패 ${TOKEN}`); };
+	await h.startBot();
+	await h.send(h.msg("/update"));
+	const text = await h.text("새 버전을 확인하지 못했어요");
+	assert.ok(!text.includes(TOKEN) && !text.includes("SECRET-token"));
+});
+
+test("버튼 설치: 상태를 먼저 저장하고 시작 메시지를 보낸 뒤 installUpdate 를 정확히 1번 부른다", async (t) => {
+	const h = await setup(t);
+	h.ports.updateInfo = { ...NEW };
+	await h.startBot();
+	const notice = await noticeVia(h);
+	let atCall = null;
+	h.ports.installImpl = async () => {
+		atCall = { state: await readState(h), texts: h.api.texts() };
+		return { updated: true, from: "0.33.0", to: "0.34.0", restart: "scheduled" };
+	};
+	await h.send(h.cb(dataOf(notice, "설치"), 1));
+	await until(() => h.ports.installs.length === 1 && atCall, "installUpdate 호출");
+	assert.deepEqual(h.ports.installs, [{ expect: "0.34.0" }]);
+	assert.deepEqual(atCall.state.update, { from: "0.33.0", to: "0.34.0", at: T0 });
+	assert.ok(atCall.texts.some((x) => x.includes("v0.34.0 설치를 시작해요")));
+	assert.ok(atCall.texts.some((x) => x.includes("docent doctor")));
+	await sleep(30);
+	assert.equal(h.ports.installs.length, 1);
+	assert.ok(!h.api.texts().some((x) => x.includes("올리지 못했어요")));
+});
+
+test("설치가 끝나기 전 두 번째 누름은 막히고 일반 질문은 그대로 처리된다", async (t) => {
+	const h = await setup(t);
+	h.ports.updateInfo = { ...NEW };
+	await h.startBot();
+	const notice = await noticeVia(h);
+	let finish;
+	h.ports.installImpl = () => new Promise((resolve) => { finish = resolve; });
+	const data = dataOf(notice, "설치");
+	await h.send(h.cb(data, 1));
+	await until(() => h.ports.installs.length === 1, "설치 시작");
+	await h.send(h.cb(data, 1));
+	await h.text("이미 올리는 중이에요");
+	assert.equal(h.ports.installs.length, 1);
+	await h.subscribed();
+	await h.send(h.msg("이건 뭐예요?"));
+	await until(() => h.ports.opens.length === 1, "설치 중에도 질문 처리");
+	finish({ updated: true, from: "0.33.0", to: "0.34.0", restart: "scheduled" });
+	await sleep(20);
+	assert.equal(h.ports.installs.length, 1);
+});
+
+test("누를 때 최신이 버튼과 다르면 설치하지 않고 새 버튼을 보낸다", async (t) => {
+	const h = await setup(t);
+	h.ports.updateInfo = { ...NEW };
+	await h.startBot();
+	const notice = await noticeVia(h);
+	h.ports.updateInfo = { ...NEW, latest: "0.35.0" };
+	await h.send(h.cb(dataOf(notice, "설치"), 1));
+	const next = await until(() => noticesOf(h).find((c) => c.params.text.includes("더 새 버전이 있어요")), "새 알림");
+	assert.ok(next.params.text.includes("v0.35.0"));
+	assert.equal(h.ports.installs.length, 0);
+	assert.match(dataOf(next, "설치"), /^u:\d+$/);
+	assert.notEqual(dataOf(next, "설치"), dataOf(notice, "설치"));
+});
+
+test("installUpdate 가 실패하면 토큰을 가려 알리고 상태의 update 를 지운다", async (t) => {
+	const h = await setup(t);
+	h.ports.updateInfo = { ...NEW };
+	await h.startBot();
+	const notice = await noticeVia(h);
+	h.ports.installImpl = async () => { throw new Error(`npm 실패 ${TOKEN}`); };
+	await h.send(h.cb(dataOf(notice, "설치"), 1));
+	const text = await h.text("올리지 못했어요");
+	assert.ok(!text.includes(TOKEN) && !text.includes("SECRET-token"));
+	assert.equal((await readState(h)).update, null);
+	// 실패 뒤에는 다시 시도할 수 있다.
+	h.ports.installImpl = async () => ({ updated: true, from: "0.33.0", to: "0.34.0", restart: "scheduled" });
+	await h.send(h.cb(dataOf(notice, "설치"), 1));
+	await until(() => h.ports.installs.length === 2, "재시도");
+});
+
+test("installUpdate 가 updated:false 를 돌려주면 update 를 지우고 최신이라고 알린다", async (t) => {
+	const h = await setup(t);
+	h.ports.updateInfo = { ...NEW };
+	await h.startBot();
+	const notice = await noticeVia(h);
+	h.ports.installImpl = async () => ({ updated: false, current: "0.34.0", latest: "0.34.0" });
+	await h.send(h.cb(dataOf(notice, "설치"), 1));
+	await h.text("이미 최신 버전이에요 (v0.34.0)");
+	assert.equal((await readState(h)).update, null);
+});
+
+test("주인이 아닌 계정의 u 콜백은 설치하지 않는다", async (t) => {
+	const h = await setup(t);
+	h.ports.updateInfo = { ...NEW };
+	await h.startBot();
+	const notice = await noticeVia(h);
+	const checks = h.ports.checks.length;
+	await h.send(h.cb(dataOf(notice, "설치"), 1, 7));
+	assert.equal(h.ports.installs.length, 0);
+	assert.equal(h.ports.checks.length, checks);
+});
+
+test("시작 보고: 버전이 바뀌면 1개, 설치가 끝나지 않았으면 1개, 기록이 없으면 0개", async (t) => {
+	const changed = await setup(t, { state: { version: "0.32.0" } });
+	await changed.startBot();
+	await changed.text("도슨트 버전이 바뀌었어요: v0.32.0 → v0.33.0");
+	assert.equal(changed.api.texts().length, 1);
+	assert.equal((await readState(changed)).version, "0.33.0");
+
+	const stuck = await setup(t, { state: { version: "0.33.0", update: { from: "0.33.0", to: "0.34.0", at: T0 } } });
+	await stuck.startBot();
+	await stuck.text("v0.34.0 설치가 끝나지 않았어요");
+	assert.equal(stuck.api.texts().length, 1);
+	const saved = await readState(stuck);
+	assert.equal(saved.update, null);
+	assert.equal(saved.version, "0.33.0");
+
+	const fresh = await setup(t);
+	await fresh.startBot();
+	assert.equal(fresh.api.texts().length, 0);
+	assert.equal((await readState(fresh)).version, "0.33.0");
+});
+
+test("버전이 바뀐 뒤 시작하면 끝난 설치 기록은 알림 없이 정리된다", async (t) => {
+	const h = await setup(t, { state: { version: "0.33.0", update: { from: "0.33.0", to: "0.34.0", at: T0 } } });
+	h.ports.version = "0.34.0";
+	await h.startBot();
+	await h.text("도슨트 버전이 바뀌었어요: v0.33.0 → v0.34.0");
+	assert.equal(h.api.texts().length, 1);
+	assert.equal((await readState(h)).update, null);
+});
+
+test("/status 는 버전과 peers 줄을 보이고 peerVersions 가 실패해도 상태는 온다", async (t) => {
+	const h = await setup(t);
+	h.ports.peers = [{ name: "맥북", version: "0.32.0" }, { name: "미니", version: null }];
+	await h.startBot();
+	await h.send(h.msg("/status"));
+	const text = await h.text("버전: v0.33.0");
+	assert.ok(text.startsWith("버전: v0.33.0"));
+	assert.ok(text.includes("맥북: v0.32.0") && text.includes("미니: 버전을 확인하지 못했어요"));
+	h.ports.peersImpl = async () => { throw new Error("peers 실패"); };
+	const before = h.api.texts().length;
+	await h.send(h.msg("/status"));
+	const next = await until(() => h.api.texts().slice(before)[0], "peers 실패 뒤 상태");
+	assert.ok(next.includes("버전: v0.33.0") && next.includes("진행 중 0개"));
+});
+
+test("손상된 상태 필드는 버리고 시작한다", async (t) => {
+	const h = await setup(t, { state: { offset: 7, version: 5, notifiedVersion: 3, update: "x" } });
+	await h.startBot();
+	assert.equal(h.api.texts().length, 0);
+	assert.ok(h.logs.every((line) => !line.includes("망가져")));
+	const saved = await readState(h);
+	assert.equal(saved.offset, 7);
+	assert.equal(saved.version, "0.33.0");
+	assert.equal(saved.notifiedVersion, null);
+	assert.equal(saved.update, null);
+
+	const odd = await setup(t, { state: { version: "1.2", notifiedVersion: "v1.2.3", update: { from: "1", to: "2.0.0", at: 1 } } });
+	await odd.startBot();
+	const state = await readState(odd);
+	assert.equal(state.version, "0.33.0");
+	assert.equal(state.notifiedVersion, null);
+	assert.equal(state.update, null);
+	assert.equal(odd.api.texts().length, 0);
 });
