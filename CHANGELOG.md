@@ -2,6 +2,11 @@
 
 형식: [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/). 버전은 [SemVer](https://semver.org/lang/ko/). 0.x 동안은 minor 가 새 기능, patch 가 고침.
 
+## [0.33.1] — 2026-11-25
+
+### 바뀜
+- 텔레그램 봇 업데이트를 실제 기기에서 확인하는 릴리스예요. 기능 변화는 없어요.
+
 ## [0.33.0] — 2026-11-25
 
 ### 추가
