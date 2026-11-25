@@ -68,3 +68,4 @@
 - [0072 화면에서 새 버전 받기](docs/decisions/0072-update-from-release.md)
 - [0073 릴리스에 macOS 앱 포함](docs/decisions/0073-macos-app-in-release.md)
 - [0076 텔레그램 상주 봇](docs/decisions/0076-telegram-resident-bot.md)
+- [0077 텔레그램에서 새 버전 받기](docs/decisions/0077-update-from-telegram.md)
